@@ -98,9 +98,16 @@ function refreshContext() {
 
 const clone = value => JSON.parse(JSON.stringify(value));
 const asArray = value => Array.isArray(value) ? value.filter(Boolean).map(String) : [];
-const asList = value => Array.isArray(value)
-    ? value.filter(Boolean).map(item => typeof item === 'object' ? text(item.name ?? item.label ?? item.value ?? item.text ?? item.content ?? item.quote ?? item.alias ?? item.key ?? JSON.stringify(item)) : String(item))
-    : text(value).split(/[\n,，、]/).map(item => item.trim()).filter(Boolean);
+const asList = value => {
+    if (Array.isArray(value)) return value.filter(Boolean).map(item => typeof item === 'object' ? text(item.name ?? item.label ?? item.value ?? item.text ?? item.content ?? item.quote ?? item.alias ?? item.key ?? JSON.stringify(item)) : String(item));
+    const source = text(value);
+    if (!source) return [];
+    try {
+        const parsed = JSON.parse(source);
+        if (Array.isArray(parsed)) return asList(parsed);
+    } catch { /* fall back to the loose localized list format below */ }
+    return source.replace(/^\[|\]$/g, '').split(/[\n,，、]/).map(item => item.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
+};
 const unique = values => [...new Set(asArray(values))];
 const text = value => {
     if (value === null || value === undefined) return '';
@@ -716,7 +723,25 @@ function parseKeyValueBlock(value) {
         const direct = aliases[raw] || aliases[normalized] || normalizedAliases[normalized];
         return direct || normalized;
     };
-    for (const line of text(value).split(/\r?\n/)) {
+    const escapeRegExp = source => source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Some gateways remove newlines while serializing a tagged response:
+    // `name: ... aliases: [...] gender: ...`. Split only at known field
+    // labels so the value of a long field remains intact.
+    const inlineLabels = Object.keys(aliases)
+        .sort((a, b) => b.length - a.length)
+        .map(escapeRegExp)
+        .join('|');
+    const inlineMatcher = new RegExp(`(?:^|[\\s>])(${inlineLabels})\\s*[:：]`, 'gi');
+    const inlineMatches = [...text(value).matchAll(inlineMatcher)];
+    const inlineLines = inlineMatches.length > 1
+        ? inlineMatches.map((match, index) => {
+            const labelStart = match.index + match[0].indexOf(match[1]);
+            const nextStart = inlineMatches[index + 1]?.index;
+            const end = nextStart === undefined ? text(value).length : nextStart;
+            return text(value).slice(labelStart, end).trim();
+        }).join('\n')
+        : text(value);
+    for (const line of inlineLines.split(/\r?\n/)) {
         const cleanLine = line.trim()
             .replace(/^<\/?(?:persona|npcs?|npc|outline|outline_patch|persona_patch)[^>]*>\s*/i, '')
             .replace(/\s*<\/?(?:persona|npcs?|npc|outline|outline_patch|persona_patch)>\s*$/i, '')
@@ -808,7 +833,14 @@ function taggedNpcs(raw) {
         .map(match => match[1].trim())
         .filter(Boolean));
     return normalizeNpcCollection(blocks
-        .map(block => extractJson(block) || parseKeyValueBlock(block))
+        .map(block => {
+            const structured = extractJson(block);
+            // A field-list NPC can contain an aliases JSON array. That array
+            // is not the NPC object; fall back to the complete key/value block.
+            return structured && typeof structured === 'object' && !Array.isArray(structured)
+                ? structured
+                : parseKeyValueBlock(block);
+        })
         .filter(fields => fields && (fields.name || fields.姓名 || fields.appearance || fields.外貌 || fields.identity || fields.身份背景)));
 }
 
