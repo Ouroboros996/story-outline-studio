@@ -66,6 +66,8 @@
 .sos-worldbook-source { display: grid; gap: 8px; max-width: 640px; margin-bottom: 14px; }
 .sos-worldbook-source label { color: #c8d0db; font-size: 13px; font-weight: 700; }
 .sos-worldbook-source small { margin-top: 0; }
+.sos-inline-control { display: flex; align-items: center; gap: 8px; }
+.sos-inline-control select { min-width: 0; flex: 1; }
 .sos-import-list { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-height: 28px; margin-bottom: 13px; color: var(--sos-muted); }
 .sos-import-list span { padding: 6px 9px; background: var(--sos-panel-2); color: var(--sos-ink); font-size: 12px; }
 .sos-import-list em { font-size: 12px; }
