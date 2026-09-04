@@ -1,7 +1,8 @@
 const EXTENSION_ID = 'story-outline-studio';
 const METADATA_KEY = 'storyOutlineStudio';
+const CHAT_WORLD_INFO_KEY = 'world_info';
 const PROMPT_KEY = 'story-outline-studio-continuity';
-const VERSION = 13;
+const VERSION = 14;
 
 // Load core modules after the extension script itself has been evaluated. This
 // avoids the script.js <-> st-context.js cycle preventing the public API from
@@ -241,6 +242,7 @@ function defaultState() {
             customTropes: '',
             detail: '',
             length: 'short',
+            streamStructured: false,
         },
         userPersona: '',
         userPersonaData: {},
@@ -259,6 +261,7 @@ function defaultState() {
         completedStorySnapshot: '',
         completedStoryMessages: 0,
         worldBookName: '',
+        attachedWorldBookName: '',
         lastGeneratedAt: 0,
         lastGeneration: {
             kind: '',
@@ -277,6 +280,7 @@ function getState() {
     next.config.backgrounds = unique(next.config.backgrounds);
     next.config.relationships = unique(next.config.relationships);
     next.config.tropes = unique(next.config.tropes);
+    next.config.streamStructured = Boolean(next.config.streamStructured);
     next.userPersonaData = next.userPersonaData && typeof next.userPersonaData === 'object' ? next.userPersonaData : {};
     next.outlineData = next.outlineData && typeof next.outlineData === 'object' ? next.outlineData : {};
     if (!Object.values(next.userPersonaData).some(Boolean) && next.userPersona) {
@@ -905,7 +909,8 @@ function validatePersona(persona) {
 }
 
 function selectedChips(category, values) {
-    return values.map(value => `<button type="button" class="sos-chip ${category} ${state.config[category]?.includes(value) ? 'selected' : ''}" data-category="${category}" data-value="${escapeHtml(value)}">${escapeHtml(value)}</button>`).join('');
+    const sorted = [...values].sort((a, b) => String(a).localeCompare(String(b), 'zh-Hans-CN-u-co-pinyin', { sensitivity: 'base' }));
+    return sorted.map(value => `<button type="button" class="sos-chip ${category} ${state.config[category]?.includes(value) ? 'selected' : ''}" data-category="${category}" data-value="${escapeHtml(value)}">${escapeHtml(value)}</button>`).join('');
 }
 
 function customValues(category) {
@@ -928,10 +933,11 @@ function configMarkup() {
             <div class="sos-field"><label>结局</label><div class="sos-segment" data-setting="ending">${['HE', 'BE', '开放式'].map(item => `<button type="button" class="${c.ending === item ? 'selected' : ''}" data-value="${item}">${item}</button>`).join('')}</div></div>
             <div class="sos-field sos-field-wide"><label>剧情情节关键词（可无限组合）</label><div class="sos-chip-grid" data-sos-scroll="tropes">${selectedChips('tropes', TROPES)}</div><textarea id="sos-custom-tropes" placeholder="自定义剧情关键词">${escapeHtml(c.customTropes)}</textarea></div>
             <div class="sos-field"><label>故事长度</label><div class="sos-segment" data-setting="length">${Object.entries(LENGTHS).map(([key, item]) => `<button type="button" class="${c.length === key ? 'selected' : ''}" data-value="${key}">${item.label}</button>`).join('')}</div><small>这里只控制篇幅倾向和推进节奏，不限制大纲字数。中篇至少保留 20 个 user 交互楼层，长篇至少保留 50 个。</small></div>
+            <div class="sos-field"><label>大纲 / NPC 生成方式</label><label class="sos-switch"><input id="sos-stream-structured" type="checkbox" ${c.streamStructured ? 'checked' : ''}><span>使用前台流式生成</span></label><small>开启后请求会走酒馆正常生成流程，跟随酒馆的流式设置并把结构化草稿留在聊天中；关闭时使用静默结构化请求，不污染聊天。</small></div>
             <div class="sos-field"><label>特别想看的情节 / 禁区 / 补充要求</label><textarea id="sos-detail" placeholder="例如：必须有雨夜重逢、不要误会拖太久、某个 NPC 必须先道歉...">${escapeHtml(c.detail)}</textarea></div>
         </section>
         <div class="sos-subsection"><strong>已导入参考角色卡</strong><div class="sos-import-list">${state.importedCharacterReferences.length ? state.importedCharacterReferences.map((reference, index) => `<span>${escapeHtml(reference.name)} <small>（${escapeHtml(reference.source)}）</small> <button type="button" class="sos-remove-character-import" data-index="${index}" title="移除">×</button></span>`).join('') : '<em>暂无。可导入其他角色卡，保留其角色内核、身份逻辑和说话方式，用于平行世界创作。</em>'}</div></div>
-        <div class="sos-subsection"><strong>已导入参考世界书</strong><div class="sos-import-list">${state.importedWorldBooks.length ? state.importedWorldBooks.map((book, index) => `<span>${escapeHtml(book.name)} <button type="button" class="sos-remove-worldbook-import" data-index="${index}" title="移除">×</button></span>`).join('') : '<em>暂无。可以导入其他角色卡的世界书，用作平行世界参考。</em>'}</div><label class="sos-file-button"><i class="fa-solid fa-file-import"></i> 导入 JSON 世界书 / 角色卡<input id="sos-worldbook-file" type="file" accept=".json,application/json" hidden></label></div>
+        <div class="sos-subsection"><strong>已导入参考世界书</strong><div class="sos-import-list">${state.importedWorldBooks.length ? state.importedWorldBooks.map((book, index) => `<span>${escapeHtml(book.name)} <button type="button" class="sos-remove-worldbook-import" data-index="${index}" title="移除">×</button></span>`).join('') : '<em>暂无。可以导入其他角色卡的世界书，用作平行世界参考。</em>'}</div><label class="sos-file-button"><i class="fa-solid fa-file-import"></i> 导入 JSON 世界书 / 角色卡<input id="sos-worldbook-file" type="file" accept=".json,application/json" hidden></label><div class="sos-actions sos-import-actions"><button type="button" class="sos-secondary" data-action="attach-reference-worldbook"><i class="fa-solid fa-link"></i> 创建并挂载平行 IF 世界书</button></div><small>${state.attachedWorldBookName ? `当前聊天已挂载：${escapeHtml(state.attachedWorldBookName)}` : '挂载后，酒馆本身会把合并世界书放入每次正常 AI 请求的 World Info 上下文。'}</small></div>
         <div class="sos-actions"><button type="button" class="sos-primary" data-action="generate-outline"><i class="fa-solid fa-wand-magic-sparkles"></i> ${state.outline ? '重新生成大纲' : '生成剧情大纲'}</button></div>`;
 }
 
@@ -1074,6 +1080,8 @@ function setCustomValues() {
     if (relationships !== undefined) state.config.customRelationships = relationships;
     if (tropes !== undefined) state.config.customTropes = tropes;
     if (detail !== undefined) state.config.detail = detail;
+    const streamStructured = document.getElementById('sos-stream-structured');
+    if (streamStructured) state.config.streamStructured = streamStructured.checked;
 }
 
 function bindPanelEvents() {
@@ -1093,6 +1101,7 @@ function bindPanelEvents() {
         selected ? values.delete(button.dataset.value) : values.add(button.dataset.value);
         state.config[category] = [...values];
         button.classList.toggle('selected', !selected);
+        button.blur();
         saveState();
         const restoreScroll = () => {
             if (main) main.scrollTop = mainScrollTop;
@@ -1109,10 +1118,15 @@ function bindPanelEvents() {
     }));
     panel.querySelectorAll('.sos-segment button').forEach(button => button.addEventListener('click', () => {
         setCustomValues();
-        state.config[button.parentElement.dataset.setting] = button.dataset.value;
+        const setting = button.parentElement.dataset.setting;
+        state.config[setting] = button.dataset.value;
         saveState();
         rerender();
     }));
+    panel.querySelector('#sos-stream-structured')?.addEventListener('change', () => {
+        setCustomValues();
+        saveState();
+    });
     panel.querySelectorAll('[data-npc-field]').forEach(input => input.addEventListener('input', () => {
         const npc = state.npcs[Number(input.dataset.npcIndex)];
         if (!npc) return;
@@ -1167,6 +1181,7 @@ async function handleAction(action, button) {
     if (action === 'continue-story') return continueStory();
     if (action === 'revise-from-story') return reviseFromStory();
     if (action === 'show-outline') { activeStage = 'outline'; rerender(); }
+    if (action === 'attach-reference-worldbook') return attachReferenceWorldBook();
 }
 
 function configPayload() {
@@ -1799,6 +1814,117 @@ async function generateJson(prompt, schema, responseLength = 1200, { allowText =
     throw new Error(`AI 返回内容无法识别为 JSON、标签或字段文本，请重试。当前草稿已保留。响应摘要：${preview}${repairError ? `；${repairError}` : ''}`);
 }
 
+async function generateJsonForeground(prompt, schema, { allowText = false, patchTag = '' } = {}) {
+    // SillyTavern 1.17 deliberately excludes quiet requests from its streaming
+    // processor. A foreground request is the only honest way to expose native
+    // streaming, so its structured draft is intentionally retained in chat.
+    const fullTag = schema?.properties?.npcs ? '<npcs><npc>每个字段一行：内容</npc></npcs>' : schema?.properties?.name && !schema?.properties?.opening ? '<persona>每个字段一行：内容</persona>' : '<outline>开端：...\n发展：...\n转折：...\n高潮：...\n结局：...</outline>';
+    const patchProtocol = patchTag
+        ? `本次是局部修改，只输出被修改的字段，不要重写未修改内容：<${patchTag}>字段：新内容</${patchTag}>。NPC 修改时使用 <npc_patch name="目标姓名">字段：新内容</npc_patch>。`
+        : `请优先使用下面的纯文本标签协议返回完整结果：${fullTag}`;
+    const generationSchema = getGenerationSchema(schema, patchTag);
+    const schemaInstruction = `\n字段参考（不要输出 schema）：${JSON.stringify(generationSchema)}\n${patchProtocol}不要输出解释、Markdown 或思维链。若你能稳定返回 JSON，也可以返回单个 JSON 对象。`;
+    const kind = generationKind(schema);
+    const beforeLength = ctx.chat?.length || 0;
+    let generated;
+    let temporaryUserMessage = null;
+    const textarea = document.getElementById('send_textarea');
+    const pendingUserInput = textarea?.value || '';
+
+    // The continuity prompt contains the accepted outline and should only
+    // govern narrative turns. Leaving it active here can make a revision echo
+    // the story prompt instead of returning the requested structure.
+    ctx.setExtensionPrompt?.(PROMPT_KEY, '', 1, 0, false);
+    try {
+        // A structured-generation button must not accidentally submit text
+        // that the user has left in the normal chat composer.
+        if (textarea && pendingUserInput) {
+            textarea.value = '';
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        // In ST 1.17, an empty normal request can remove the previous
+        // assistant message before generating. A hidden-in-memory user anchor
+        // makes the request an ordinary turn; it is removed immediately after
+        // generation and is never retained in the chat.
+        if (Array.isArray(ctx.chat)) {
+            temporaryUserMessage = {
+                name: ctx.name1 || 'User',
+                is_user: true,
+                mes: '[剧情工作台结构化请求]',
+                extra: { storyOutlineStudioTemporary: true },
+            };
+            ctx.chat.push(temporaryUserMessage);
+        }
+        const result = await ctx.generate('normal', {
+            quiet_prompt: `${prompt}${schemaInstruction}\n所有人物必须明确为成年人。`,
+            quietToLoud: true,
+            skipWIAN: false,
+            force_name2: true,
+        });
+        generated = (ctx.chat || []).slice(beforeLength)
+            .filter(message => !message.is_user && text(message?.mes))
+            .at(-1);
+        // Some 1.17 adapters return foreground text before their chat-save
+        // hook adds a message. It is still a valid parse source, although it
+        // cannot be marked as a retained draft until the adapter saves it.
+        if (!generated && result !== undefined) {
+            const returned = extractAssistantContent(result).trim() || extractGeneratedText(result).trim();
+            if (returned) generated = { mes: returned, extra: {} };
+        }
+    } catch (error) {
+        const wrapped = wrapGenerationError(error);
+        saveGenerationSnapshot(kind, { error: wrapped.message });
+        throw wrapped;
+    } finally {
+        if (temporaryUserMessage && Array.isArray(ctx.chat)) {
+            const temporaryIndex = ctx.chat.indexOf(temporaryUserMessage);
+            if (temporaryIndex >= 0) ctx.chat.splice(temporaryIndex, 1);
+            try {
+                await ctx.saveChat?.();
+            } catch (error) {
+                console.warn(`[${EXTENSION_ID}] failed to persist temporary-message cleanup`, error);
+            }
+        }
+        if (textarea && pendingUserInput && !textarea.value) {
+            textarea.value = pendingUserInput;
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        updateContinuityPrompt();
+    }
+
+    const raw = text(generated?.mes);
+    if (!generated || !raw) {
+        const error = new Error('酒馆请求已完成，但没有写入结构化草稿消息。请检查 API 响应和酒馆控制台。');
+        saveGenerationSnapshot(kind, { error: error.message });
+        throw error;
+    }
+    if (isUpstreamErrorText(raw)) {
+        const wrapped = wrapGenerationError(new Error(raw));
+        saveGenerationSnapshot(kind, { raw, error: wrapped.message });
+        throw wrapped;
+    }
+    const parsed = parseGeneratedPayload(raw, allowText, schema);
+    const generatedInChat = (ctx.chat || []).includes(generated);
+    if (generatedInChat) {
+        generated.extra = {
+            ...(generated.extra || {}),
+            storyOutlineStudioDraft: { kind, at: Date.now() },
+        };
+        await ctx.saveChat?.();
+    }
+    if (parsed && hasGeneratedShape(parsed, schema)) {
+        saveGenerationSnapshot(kind, { raw });
+        return parsed;
+    }
+    saveGenerationSnapshot(kind, { raw, error: '前台流式草稿无法识别为所需结构' });
+    throw new Error('已将流式草稿保留在聊天中，但其格式无法识别。请关闭“前台流式生成”后重试，或修改该草稿要求模型按标签协议返回。');
+}
+
+async function generateStructured(prompt, schema, responseLength, options = {}) {
+    if (state.config.streamStructured && !options.forceQuiet) return generateJsonForeground(prompt, schema, options);
+    return generateJson(prompt, schema, responseLength, options);
+}
+
 async function withGenerating(task) {
     if (generating) return;
     generating = true;
@@ -1937,7 +2063,7 @@ async function generateOutline(feedback = '', mode = 'new') {
         // and its metadata. The selected length is a pacing hint, not a token
         // ceiling, and the local formatter no longer truncates the response.
         const outlineResponseLength = state.config.length === 'long' ? 12000 : 8000;
-        const result = await generateJson(prompt, outlineSchema(), outlineResponseLength, { allowText: true, patchTag: mode === 'revise' ? 'outline_patch' : '' });
+        const result = await generateStructured(prompt, outlineSchema(), outlineResponseLength, { allowText: true, patchTag: mode === 'revise' ? 'outline_patch' : '' });
         const outlineData = mode === 'revise'
             ? mergeOutlineData(
                 state.outlineData,
@@ -1995,7 +2121,7 @@ async function generateNpcs(feedback = '', mode = 'new') {
             : '关系数量为 1V1：生成 1 名主要恋爱 NPC；只有在大纲明确需要且对主线有作用时，才额外生成少量功能 NPC。';
         const npcSchema = { type: 'object', properties: { npcs: { type: 'array', minItems: state.config.relationshipMode === 'NP' && mode === 'new' ? 2 : 1, items: { type: 'object', properties: { name: { type: 'string' }, aliases: { type: 'array', items: { type: 'string' } }, gender: { type: 'string' }, age: { type: 'string' }, height: { type: 'string' }, appearance: { type: 'string' }, personality: { type: 'string' }, identity: { type: 'string' }, past: { type: 'string' }, relationship: { type: 'string' }, attitude: { type: 'string' }, quotes: { type: 'array', items: { type: 'string' } }, nsfw: { type: 'string' }, body: { type: 'string' } }, required: ['name', 'aliases', 'gender', 'age', 'height', 'appearance', 'personality', 'identity', 'past', 'relationship', 'attitude', 'quotes', 'nsfw', 'body'] } } }, required: ['npcs'] };
         const prompt = `${basePrompt()}\n已接受的大纲：${state.outline}\n请生成该大纲所需的全部主要 NPC。${npcCountRule}每人必须是明确的成年人，必须返回至少 1 人且每个字段完整。严格按以下顺序输出每一名 NPC，第一行必须是 name（姓名）：name、aliases（称呼/关键词）、gender、age、height、appearance、personality、identity、past、relationship、attitude、quotes、nsfw、body。没有完成一个 NPC 的全部字段前，不得开始下一个 NPC。先简洁、完整地写完所有 NPC，再补充细节；不得用省略号或“内容已截断”代替字段。每名 NPC 都必须单独使用完整的 <npc>...</npc>，最后闭合 </npcs>。不得输出分析、解释、前言或 Markdown。外貌要有至少两条可识别细节，不能都是模板化帅哥美女；性格必须能从身份和过去经历合理推出，不能自相矛盾。NSFW 字段只写成年角色的偏好、体位和语言风格，不改变人物性格。关键词必须覆盖姓名、昵称、去姓名、user 对其特殊称呼。${previous}${revision}\n如果无法返回 JSON，请使用 <npcs><npc>字段：内容</npc></npcs>，不要解释。`;
-        const result = await generateJson(prompt, npcSchema, state.config.relationshipMode === 'NP' ? 16000 : 10000, { allowText: true, patchTag: mode === 'revise' ? 'npc_patch' : '' });
+        const result = await generateStructured(prompt, npcSchema, state.config.relationshipMode === 'NP' ? 16000 : 10000, { allowText: true, patchTag: mode === 'revise' ? 'npc_patch' : '' });
         let nextNpcs = mode === 'revise'
             ? mergeNpcDrafts(
                 state.npcs,
@@ -2018,7 +2144,7 @@ async function generateNpcs(feedback = '', mode = 'new') {
             const existingNames = nextNpcs.map(npc => npc.name).filter(Boolean);
             try {
                 const supplementPrompt = `${basePrompt()}\n已接受的大纲：${state.outline}\n当前已经生成的主要 NPC：${JSON.stringify(nextNpcs)}\nNP 模式至少需要 2 名主要 NPC，现在只有 ${nextNpcs.length} 名。请只补充至少 ${2 - nextNpcs.length} 名新的成年主要 NPC，承担大纲中尚未覆盖的关系线、冲突线或 NSFW 节点。不得重写或重复以下角色：${existingNames.join('、') || '已有角色'}。先完整写完所有新增 NPC，再补充细节；不得省略字段，不得用省略号。只输出 <npcs><npc>完整字段</npc></npcs>。`;
-                const supplement = await generateJson(supplementPrompt, { ...npcSchema, properties: { ...npcSchema.properties, npcs: { ...npcSchema.properties.npcs, minItems: 1 } } }, 10000, { allowText: true });
+                const supplement = await generateStructured(supplementPrompt, { ...npcSchema, properties: { ...npcSchema.properties, npcs: { ...npcSchema.properties.npcs, minItems: 1 } } }, 10000, { allowText: true });
                 const knownNames = new Set(nextNpcs.flatMap(npc => [npc.name, ...npc.aliases]).filter(Boolean));
                 const additions = (supplement.npcs || []).map(normalizeNpc).filter(npc => npc.name && !knownNames.has(npc.name));
                 nextNpcs = [...nextNpcs, ...additions];
@@ -2128,6 +2254,110 @@ async function importWorldBook(event) {
         toastr.success(`已导入${importedParts.join('和')}`);
     } catch (error) { toastr.error(error.message || '导入失败'); }
     event.target.value = '';
+}
+
+function safeWorldBookName(value) {
+    return text(value)
+        .replace(/[\\/:*?"<>|]/g, '-')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 64);
+}
+
+function cloneWorldBookData(data) {
+    const copied = data && typeof data === 'object' ? clone(data) : {};
+    copied.entries = copied.entries && typeof copied.entries === 'object' ? copied.entries : {};
+    return copied;
+}
+
+function referenceCharacterWorldEntry(reference) {
+    const name = text(reference?.name) || '未命名参考角色';
+    const keys = unique([name, ...asList(reference?.aliases), name.length > 1 ? name.slice(1) : '']);
+    const content = [
+        '[剧情工作台平行 IF 参考角色]',
+        `姓名：${name}`,
+        `角色描述：${text(reference?.description)}`,
+        `性格：${text(reference?.personality)}`,
+        `场景与身份：${text(reference?.scenario)}`,
+        `开场白：${text(reference?.first_mes)}`,
+        `示例对话：${text(reference?.mes_example)}`,
+        `系统提示：${text(reference?.system_prompt)}`,
+        `历史提示：${text(reference?.post_history_instructions)}`,
+        `创作者备注：${text(reference?.creator_notes)}`,
+        '要求：在平行 IF 故事中保留该角色的核心身份逻辑、性格和说话方式，避免 OOC。',
+    ].filter(line => !line.endsWith('：')).join('\n');
+    return { keys, content, comment: `SOS IF Character - ${name}` };
+}
+
+function importedWorldBookEntries() {
+    const result = [];
+    for (const book of state.importedWorldBooks) {
+        for (const [index, imported] of book.entries.entries()) {
+            const content = text(imported?.content);
+            if (!content) continue;
+            result.push({
+                keys: unique([...asList(imported?.keys), ...asList(imported?.key)]),
+                content,
+                comment: `SOS IF World - ${text(book.name) || '未命名世界书'} - ${index + 1}`,
+            });
+        }
+    }
+    return result;
+}
+
+function writeWorldInfoEntry(bookName, data, normalized) {
+    const existing = Object.values(data.entries).find(entry => text(entry?.comment) === normalized.comment);
+    const entry = existing || createWorldInfoEntry(bookName, data);
+    if (!entry) return false;
+    entry.key = normalized.keys.length ? normalized.keys : [normalized.comment];
+    entry.keysecondary = [];
+    entry.comment = normalized.comment;
+    entry.content = normalized.content;
+    // Imported parallel references must be in the normal World Info context
+    // even when the player does not type one of their names in a given turn.
+    entry.constant = true;
+    entry.selective = false;
+    entry.order = 200;
+    entry.disable = false;
+    return true;
+}
+
+async function attachReferenceWorldBook() {
+    if (!state.importedCharacterReferences.length && !state.importedWorldBooks.length) {
+        return toastr.warning('请先导入至少一张参考角色卡或世界书。');
+    }
+    await withGenerating(async () => {
+        refreshContext();
+        const existingChatBook = text(ctx.chatMetadata?.[CHAT_WORLD_INFO_KEY]);
+        const previousAttached = text(state.attachedWorldBookName);
+        const fallback = `剧情工作台-平行IF-${ctx.getCurrentChatId?.() || currentCharacterContext().name}`;
+        const bookName = safeWorldBookName(previousAttached || fallback) || '剧情工作台-平行IF';
+
+        // Clone a directly attached existing world book into a dedicated
+        // composite so this feature never mutates or deletes the user's source
+        // book. Re-running updates the same composite and avoids duplicates.
+        const sourceName = existingChatBook && existingChatBook !== bookName ? existingChatBook : bookName;
+        const source = await loadWorldInfo(sourceName);
+        const data = cloneWorldBookData(source);
+        let written = 0;
+        for (const reference of state.importedCharacterReferences) {
+            if (writeWorldInfoEntry(bookName, data, referenceCharacterWorldEntry(reference))) written++;
+        }
+        for (const entry of importedWorldBookEntries()) {
+            if (writeWorldInfoEntry(bookName, data, entry)) written++;
+        }
+        if (!written) throw new Error('导入内容中没有可写入世界书的有效条目。');
+
+        await saveWorldInfo(bookName, data, true);
+        await ctx.updateWorldInfoList?.();
+        if (!ctx.chatMetadata) throw new Error('当前聊天元数据不可用，无法挂载聊天世界书。');
+        ctx.chatMetadata[CHAT_WORLD_INFO_KEY] = bookName;
+        await ctx.saveMetadata?.();
+        state.attachedWorldBookName = bookName;
+        saveState();
+        rerender();
+        toastr.success(`已挂载当前聊天世界书：${bookName}${existingChatBook && existingChatBook !== bookName ? '（已复制并合并原聊天世界书）' : ''}`);
+    });
 }
 
 function storyPrompt() {
