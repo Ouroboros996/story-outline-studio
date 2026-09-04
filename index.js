@@ -1,7 +1,7 @@
 const EXTENSION_ID = 'story-outline-studio';
 const METADATA_KEY = 'storyOutlineStudio';
 const PROMPT_KEY = 'story-outline-studio-continuity';
-const VERSION = 10;
+const VERSION = 11;
 
 // Load core modules after the extension script itself has been evaluated. This
 // avoids the script.js <-> st-context.js cycle preventing the public API from
@@ -741,9 +741,21 @@ function taggedPersona(raw) {
 }
 
 function taggedNpcs(raw) {
-    const containers = extractTaggedBlocks(raw, 'npcs');
-    const blocks = (containers.length ? containers.flatMap(container => extractTaggedBlocks(container, 'npc')) : extractTaggedBlocks(raw, 'npc'));
-    return blocks.length ? blocks.map(block => extractJson(block) || parseKeyValueBlock(block)) : [];
+    const source = stripReasoningBlocks(raw);
+    if (!source) return [];
+
+    // Parse each opening <npc> independently. Models and gateways sometimes
+    // stop at the output limit before writing </npc> or </npcs>; the fields
+    // already returned are still useful as an editable draft.
+    const regions = [...source.matchAll(/<npcs\b[^>]*>([\s\S]*?)(?:<\/npcs>|$)/gi)]
+        .map(match => match[1]);
+    const candidates = regions.length ? regions : [source];
+    const blocks = candidates.flatMap(container => [...container.matchAll(/<npc\b[^>]*>([\s\S]*?)(?=<\/npc>|<npc\b|<\/npcs>|$)/gi)]
+        .map(match => match[1].trim())
+        .filter(Boolean));
+    return blocks
+        .map(block => extractJson(block) || parseKeyValueBlock(block))
+        .filter(fields => fields && (fields.name || fields.姓名 || fields.appearance || fields.外貌 || fields.identity || fields.身份背景));
 }
 
 function taggedPatches(raw, tag) {
@@ -845,7 +857,7 @@ function generationDiagnosticsMarkup() {
     const renderBlock = (label, value, className = '') => value
         ? `<div class="sos-diagnostic-block ${className}"><strong>${label}</strong><pre>${escapeHtml(value)}</pre></div>`
         : '';
-    return `<details class="sos-diagnostics" ${snapshot.error ? 'open' : ''}><summary><span>最近一次响应摘要</span><small>${escapeHtml(labels[snapshot.kind] || snapshot.kind || '暂无')} · ${escapeHtml(generatedAt)}</small></summary><div class="sos-diagnostics-body">${renderBlock('错误', snapshot.error, 'error')}${renderBlock('上游原始响应', snapshot.rawPreview)}${renderBlock('整理请求响应', snapshot.repairedPreview)}</div></details>`;
+    return `<details class="sos-diagnostics" ${snapshot.error ? 'open' : ''}><summary><span>最近一次响应摘要</span><small>${escapeHtml(labels[snapshot.kind] || snapshot.kind || '暂无')} · ${escapeHtml(generatedAt)}</small></summary><div class="sos-diagnostics-body"><small>这里只显示诊断预览；“诊断预览省略”不代表插件解析时丢弃了原始正文。</small>${renderBlock('错误', snapshot.error, 'error')}${renderBlock('上游原始响应', snapshot.rawPreview)}${renderBlock('整理请求响应', snapshot.repairedPreview)}</div></details>`;
 }
 
 function personaMarkup() {
@@ -874,7 +886,11 @@ function npcField(label, value, index, field, multiline = false) {
 
 function npcMarkup() {
     const cards = state.npcs.map((npc, index) => `<article class="sos-npc-card"><header><input data-npc-index="${index}" data-npc-field="name" value="${escapeHtml(npc.name)}"><button type="button" class="sos-icon-button" data-action="delete-npc" data-index="${index}" title="删除 NPC"><i class="fa-solid fa-trash"></i></button></header><div class="sos-npc-grid">${npcField('称呼 / 关键词', asArray(npc.aliases).join('、'), index, 'aliases', true)}${npcField('性别', npc.gender, index, 'gender')}${npcField('年龄（必须成年）', npc.age, index, 'age')}${npcField('身高', npc.height, index, 'height')}${npcField('外貌与辨识度特征', npc.appearance, index, 'appearance', true)}${npcField('性格', npc.personality, index, 'personality', true)}${npcField('身份背景', npc.identity, index, 'identity', true)}${npcField('过去经历', npc.past, index, 'past', true)}${npcField('与 user 的关系', npc.relationship, index, 'relationship', true)}${npcField('对 user 的态度', npc.attitude, index, 'attitude', true)}${npcField('典型语录', asArray(npc.quotes).join('\n'), index, 'quotes', true)}${npcField('NSFW 偏好 / 体位 / 语言风格', npc.nsfw, index, 'nsfw', true)}${npcField('成年身体信息（男性可填写）', npc.body, index, 'body', true)}</div></article>`).join('');
-    return `<div class="sos-section-intro"><span class="sos-kicker">04 / NPC CAST</span><h2>审核主要 NPC</h2><p>每名 NPC 都必须是成年人。请检查外貌辨识度、经历与性格的因果关系，以及对 user 的态度。接受后会写入当前角色绑定的世界书。</p></div>${generationDiagnosticsMarkup()}<div class="sos-npc-list">${cards || '<div class="sos-empty">尚未生成 NPC。请先接受大纲。</div>'}</div><div class="sos-revise"><label>NPC 修改意见</label><textarea id="sos-npc-feedback" placeholder="例如：只修改第二名 NPC 的态度和过去经历，保留其他 NPC 及其余字段；补充一个右耳耳钉的辨识特征"></textarea></div><div class="sos-actions"><button type="button" class="sos-secondary" data-action="reroll-npc"><i class="fa-solid fa-dice"></i> 直接重 roll</button><button type="button" class="sos-secondary" data-action="revise-npc" ${cards ? '' : 'disabled'}><i class="fa-solid fa-pen"></i> 按意见修改</button><button type="button" class="sos-primary" data-action="accept-npc" ${cards ? '' : 'disabled'}><i class="fa-solid fa-book"></i> 接受并写入世界书</button></div>`;
+    const draftIssues = state.npcs.map(validateNpc).filter(Boolean);
+    const draftNotice = draftIssues.length
+        ? `<div class="sos-empty">AI 返回了可识别但不完整的 NPC 草稿，已先保留到列表。接受前请补全：${escapeHtml(draftIssues.join('；'))}</div>`
+        : '';
+    return `<div class="sos-section-intro"><span class="sos-kicker">04 / NPC CAST</span><h2>审核主要 NPC</h2><p>每名 NPC 都必须是成年人。请检查外貌辨识度、经历与性格的因果关系，以及对 user 的态度。接受后会写入当前角色绑定的世界书。</p></div>${generationDiagnosticsMarkup()}${draftNotice}<div class="sos-npc-list">${cards || '<div class="sos-empty">尚未生成 NPC。请先接受大纲。</div>'}</div><div class="sos-revise"><label>NPC 修改意见</label><textarea id="sos-npc-feedback" placeholder="例如：只修改第二名 NPC 的态度和过去经历，保留其他 NPC 及其余字段；补充一个右耳耳钉的辨识特征"></textarea></div><div class="sos-actions"><button type="button" class="sos-secondary" data-action="reroll-npc"><i class="fa-solid fa-dice"></i> 直接重 roll</button><button type="button" class="sos-secondary" data-action="revise-npc" ${cards ? '' : 'disabled'}><i class="fa-solid fa-pen"></i> 按意见修改</button><button type="button" class="sos-primary" data-action="accept-npc" ${cards ? '' : 'disabled'}><i class="fa-solid fa-book"></i> 接受并写入世界书</button></div>`;
 }
 
 function storyMarkup() {
@@ -1126,7 +1142,7 @@ function limitPromptText(value, limit) {
     if (source.length <= limit) return source;
     const headLength = Math.ceil(limit * 0.72);
     const tailLength = Math.max(0, limit - headLength - 40);
-    return `${source.slice(0, headLength)}\n[…内容已截断…]\n${tailLength ? source.slice(-tailLength) : ''}`.trim();
+    return `${source.slice(0, headLength)}\n[…诊断预览省略，原响应仍会完整解析…]\n${tailLength ? source.slice(-tailLength) : ''}`.trim();
 }
 
 function currentCharacterPromptContext(fields) {
@@ -1831,9 +1847,10 @@ async function generateNpcs(feedback = '', mode = 'new') {
         const npcCountRule = state.config.relationshipMode === 'NP'
             ? '关系数量为 NP：生成所有承担主要关系线、冲突线或 NSFW 节点的主要 NPC，至少 2 人；不要只返回一个代表角色。'
             : '关系数量为 1V1：生成 1 名主要恋爱 NPC；只有在大纲明确需要且对主线有作用时，才额外生成少量功能 NPC。';
-        const prompt = `${basePrompt()}\n已接受的大纲：${state.outline}\n请生成该大纲所需的全部主要 NPC。${npcCountRule}每人必须是明确的成年人，必须返回至少 1 人且每个字段完整。外貌要有至少两条可识别细节，不能都是模板化帅哥美女；性格必须能从身份和过去经历合理推出，不能自相矛盾。NSFW 字段只写成年角色的偏好、体位和语言风格，不改变人物性格。关键词必须覆盖姓名、昵称、去姓名、user 对其特殊称呼。${previous}${revision}\n如果无法返回 JSON，请使用 <npcs><npc>字段：内容</npc></npcs>，不要解释。`;
-        const result = await generateJson(prompt, { type: 'object', properties: { npcs: { type: 'array', minItems: 1, items: { type: 'object', properties: { name: { type: 'string' }, aliases: { type: 'array', items: { type: 'string' } }, gender: { type: 'string' }, age: { type: 'string' }, height: { type: 'string' }, appearance: { type: 'string' }, personality: { type: 'string' }, identity: { type: 'string' }, past: { type: 'string' }, relationship: { type: 'string' }, attitude: { type: 'string' }, quotes: { type: 'array', items: { type: 'string' } }, nsfw: { type: 'string' }, body: { type: 'string' } }, required: ['name', 'aliases', 'gender', 'age', 'height', 'appearance', 'personality', 'identity', 'past', 'relationship', 'attitude', 'quotes', 'nsfw', 'body'] } } }, required: ['npcs'] }, state.config.relationshipMode === 'NP' ? 9000 : 6000, { allowText: true, patchTag: mode === 'revise' ? 'npc_patch' : '' });
-        const nextNpcs = mode === 'revise'
+        const npcSchema = { type: 'object', properties: { npcs: { type: 'array', minItems: state.config.relationshipMode === 'NP' && mode === 'new' ? 2 : 1, items: { type: 'object', properties: { name: { type: 'string' }, aliases: { type: 'array', items: { type: 'string' } }, gender: { type: 'string' }, age: { type: 'string' }, height: { type: 'string' }, appearance: { type: 'string' }, personality: { type: 'string' }, identity: { type: 'string' }, past: { type: 'string' }, relationship: { type: 'string' }, attitude: { type: 'string' }, quotes: { type: 'array', items: { type: 'string' } }, nsfw: { type: 'string' }, body: { type: 'string' } }, required: ['name', 'aliases', 'gender', 'age', 'height', 'appearance', 'personality', 'identity', 'past', 'relationship', 'attitude', 'quotes', 'nsfw', 'body'] } } }, required: ['npcs'] };
+        const prompt = `${basePrompt()}\n已接受的大纲：${state.outline}\n请生成该大纲所需的全部主要 NPC。${npcCountRule}每人必须是明确的成年人，必须返回至少 1 人且每个字段完整。先简洁、完整地写完所有 NPC，再补充细节；不得用省略号或“内容已截断”代替字段。每名 NPC 都必须单独使用完整的 <npc>...</npc>，最后闭合 </npcs>。外貌要有至少两条可识别细节，不能都是模板化帅哥美女；性格必须能从身份和过去经历合理推出，不能自相矛盾。NSFW 字段只写成年角色的偏好、体位和语言风格，不改变人物性格。关键词必须覆盖姓名、昵称、去姓名、user 对其特殊称呼。${previous}${revision}\n如果无法返回 JSON，请使用 <npcs><npc>字段：内容</npc></npcs>，不要解释。`;
+        const result = await generateJson(prompt, npcSchema, state.config.relationshipMode === 'NP' ? 16000 : 10000, { allowText: true, patchTag: mode === 'revise' ? 'npc_patch' : '' });
+        let nextNpcs = mode === 'revise'
             ? mergeNpcDrafts(
                 state.npcs,
                 (() => {
@@ -1844,13 +1861,34 @@ async function generateNpcs(feedback = '', mode = 'new') {
             )
             : Array.isArray(result.npcs) ? result.npcs.map(normalizeNpc) : [];
         if (!nextNpcs.length) throw new Error('AI 没有返回主要 NPC，请重试；当前 NPC 草稿已保留。');
-        const invalid = nextNpcs.map(validateNpc).find(Boolean);
-        if (invalid) throw new Error(`${invalid} 请重新生成或修改后再接受。`);
+
+        // NP models occasionally stop after one character despite the count
+        // rule. Keep that valid draft and make one focused request for only
+        // the missing cast instead of rerolling or discarding it.
+        if (mode === 'new' && state.config.relationshipMode === 'NP' && nextNpcs.length < 2) {
+            state.npcs = nextNpcs;
+            state.npcsAccepted = false;
+            saveState();
+            const existingNames = nextNpcs.map(npc => npc.name).filter(Boolean);
+            try {
+                const supplementPrompt = `${basePrompt()}\n已接受的大纲：${state.outline}\n当前已经生成的主要 NPC：${JSON.stringify(nextNpcs)}\nNP 模式至少需要 2 名主要 NPC，现在只有 ${nextNpcs.length} 名。请只补充至少 ${2 - nextNpcs.length} 名新的成年主要 NPC，承担大纲中尚未覆盖的关系线、冲突线或 NSFW 节点。不得重写或重复以下角色：${existingNames.join('、') || '已有角色'}。先完整写完所有新增 NPC，再补充细节；不得省略字段，不得用省略号。只输出 <npcs><npc>完整字段</npc></npcs>。`;
+                const supplement = await generateJson(supplementPrompt, { ...npcSchema, properties: { ...npcSchema.properties, npcs: { ...npcSchema.properties.npcs, minItems: 1 } } }, 10000, { allowText: true });
+                const knownNames = new Set(nextNpcs.flatMap(npc => [npc.name, ...npc.aliases]).filter(Boolean));
+                const additions = (supplement.npcs || []).map(normalizeNpc).filter(npc => npc.name && !knownNames.has(npc.name));
+                nextNpcs = [...nextNpcs, ...additions];
+            } catch (error) {
+                console.warn(`[${EXTENSION_ID}] failed to supplement NP cast; keeping parsed drafts`, error);
+            }
+        }
+
         state.npcs = nextNpcs;
         state.npcsAccepted = false;
         saveState();
         activeStage = 'npc';
         rerender();
+        const invalid = nextNpcs.map(validateNpc).filter(Boolean);
+        if (invalid.length) toastr.warning('已保留 AI 返回的 NPC 草稿；部分字段不完整，请在接受前补全或按意见修改。');
+        if (state.config.relationshipMode === 'NP' && nextNpcs.length < 2) toastr.warning('NP 模式目前只识别到 1 名 NPC，已保留该角色；可再次按意见补充其他主要 NPC。');
     });
 }
 

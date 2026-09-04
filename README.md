@@ -22,4 +22,5 @@ Use SillyTavern's extension update function, then refresh the page.
 - Generation uses the API, model, preset, and World Info pipeline currently selected in SillyTavern.
 - Short/medium/long are pacing and interaction-length modes, not hard outline character limits. The extension preserves all five outline sections and does not locally cut off an ending or an NSFW node.
 - Network/TLS errors are reported as failures between the local SillyTavern runtime and the upstream API. The extension retries only an empty successful response once; it does not retry a network failure.
+- NPC output that ends before the closing XML-style tag is preserved as an editable draft. In NP mode, a one-character response triggers one focused request for missing characters without rewriting the first result.
 - A character card cannot install this extension automatically. Install the extension from this repository first.
