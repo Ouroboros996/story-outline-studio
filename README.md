@@ -1,0 +1,23 @@
+# Story Outline Studio
+
+SillyTavern third-party extension for creating and managing interactive story outlines, user personas, NPC profiles, and outline-driven story progression.
+
+## Install
+
+1. Open SillyTavern.
+2. Open **Extensions** and choose **Install Extension**.
+3. Paste this repository's GitHub URL.
+4. Restart or refresh SillyTavern after installation.
+
+The companion character card and TavernHelper entry script can be imported separately after the extension is installed.
+
+## Update
+
+Use SillyTavern's extension update function, then refresh the page.
+
+## Compatibility
+
+- SillyTavern 1.18 or later is recommended.
+- Generation uses the API, model, preset, and World Info pipeline currently selected in SillyTavern.
+- A character card cannot install this extension automatically. Install the extension from this repository first.
+
