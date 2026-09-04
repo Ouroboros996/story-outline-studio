@@ -1,7 +1,7 @@
 const EXTENSION_ID = 'story-outline-studio';
 const METADATA_KEY = 'storyOutlineStudio';
 const PROMPT_KEY = 'story-outline-studio-continuity';
-const VERSION = 9;
+const VERSION = 10;
 
 // Load core modules after the extension script itself has been evaluated. This
 // avoids the script.js <-> st-context.js cycle preventing the public API from
@@ -1287,7 +1287,21 @@ function extractGeneratedText(value) {
         const nested = extractGeneratedText(choice.message ?? choice.delta ?? choice.text);
         if (nested) return nested;
     }
-    return JSON.stringify(value);
+    // An empty object is how some failed gateway adapters resolve a request.
+    // Treat it as no output instead of turning it into the misleading text
+    // "{}", which would trigger a pointless repair request and hide the
+    // original network/API failure.
+    if (Object.keys(value).length === 0) return '';
+
+    // Preserve direct structured payloads for the local parser, but do not
+    // stringify arbitrary status/config wrapper objects as if they were AI
+    // output.
+    const structuredKeys = [
+        'outline', '大纲', '剧情大纲', 'opening', 'development', 'turningPoint', 'climax', 'ending',
+        'npcs', 'npc', 'characters', 'characterList', 'character_list', '主要NPC', '主要 NPC',
+        'name', '姓名', '名字', 'appearance', '外貌', 'persona', 'userPersona', 'user_persona',
+    ];
+    return Object.keys(value).some(key => structuredKeys.includes(key)) ? JSON.stringify(value) : '';
 }
 
 function generationKind(schema) {
@@ -1519,6 +1533,9 @@ function generatedErrorMessage(error) {
 
 function wrapGenerationError(error) {
     const message = generatedErrorMessage(error);
+    if (/client network socket disconnected before secure tls connection was established|secure tls connection was established|tls handshake|socket disconnected|econnreset|enotfound|etimedout|network error|failed to fetch|request to .* failed/i.test(message)) {
+        return new Error(`连接上游 API 失败：${message}。这是云酒馆服务器与中转站之间的网络/TLS 连接问题，不是大纲格式错误。请检查 API 地址和路径、中转站状态、云酒馆服务器能否访问该域名，以及是否需要代理或更换节点。`);
+    }
     if (/\b502\b|bad gateway/i.test(message)) return new Error('酒馆上游 API 返回 502（Bad Gateway），没有生成结果。请检查 API 代理或接口地址；如果输入上下文很大，请先减少角色卡或导入世界书内容后重试。');
     if (/\b(?:400|401|403|404|408|409|413|429|500|503|504)\b|response status/i.test(message)) return new Error(`酒馆上游 API 请求失败：${message}。请检查 API 设置、额度和代理状态。`);
     return error instanceof Error ? error : new Error(message || '生成失败');
@@ -1551,27 +1568,17 @@ async function generateJson(prompt, schema, responseLength = 1200, { allowText =
         : `请优先使用下面的纯文本标签协议返回完整结果：${fullTag}`;
     const generationSchema = getGenerationSchema(schema, patchTag);
     const schemaInstruction = `\n字段参考（不要输出 schema）：${JSON.stringify(generationSchema)}\n${patchProtocol}不要输出解释、Markdown 或思维链。若你能稳定返回 JSON，也可以返回单个 JSON 对象。`;
-    let useStructuredOutput = true;
     const request = async extraPrompt => {
         const params = {
             quietPrompt: `${prompt}${schemaInstruction}${extraPrompt || ''}\n所有人物必须明确为成年人。`,
             responseLength,
             skipWIAN: false,
-            removeReasoning: true,
-            jsonSchema: useStructuredOutput ? generationSchema : null,
         };
-        try {
-            return await ctx.generateQuietPrompt(params);
-        } catch (error) {
-            // Some OpenAI-compatible gateways reject json_schema while their
-            // normal chat endpoint still works. Retry once as plain text and
-            // let the local tag/field parser consume the returned content.
-            if (useStructuredOutput && isStructuredOutputUnsupported(error)) {
-                useStructuredOutput = false;
-                return ctx.generateQuietPrompt({ ...params, jsonSchema: null });
-            }
-            throw error;
-        }
+        // Keep the primary path compatible with SillyTavern 1.17 and simple
+        // OpenAI-compatible gateways. The reference plugins use ordinary
+        // text generation and parse the result locally; JSON schema output is
+        // optional in newer cores but is rejected by many proxies.
+        return ctx.generateQuietPrompt(params);
     };
     let result;
     const kind = generationKind(schema);

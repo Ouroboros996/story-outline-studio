@@ -17,7 +17,7 @@ Use SillyTavern's extension update function, then refresh the page.
 
 ## Compatibility
 
-- SillyTavern 1.18 or later is recommended.
+- SillyTavern 1.17 or later is supported. SillyTavern 1.18 or later is recommended.
+- Generation uses the ordinary text-generation path and parses the result locally, so it does not require `json_schema` support from the API gateway.
 - Generation uses the API, model, preset, and World Info pipeline currently selected in SillyTavern.
 - A character card cannot install this extension automatically. Install the extension from this repository first.
-
