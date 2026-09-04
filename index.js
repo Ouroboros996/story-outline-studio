@@ -75,9 +75,9 @@ const TROPES = [
 ];
 
 const LENGTHS = {
-    short: { label: '短篇', max: 400, minTurns: 0 },
-    medium: { label: '中篇', max: 700, minTurns: 20 },
-    long: { label: '长篇', max: 1000, minTurns: 50 },
+    short: { label: '短篇', softTarget: 400, minTurns: 0 },
+    medium: { label: '中篇', softTarget: 700, minTurns: 20 },
+    long: { label: '长篇', softTarget: 1000, minTurns: 50 },
 };
 
 let ctx = null;
@@ -293,38 +293,28 @@ function outlineSectionText(data, key, label, limit, preserveEnd = false) {
 function fitOutlineSections(data, limit) {
     const source = data && typeof data === 'object' ? data : {};
     const labels = [
-        ['opening', '开端', 0.15, false],
-        ['development', '发展', 0.25, false],
-        ['turningPoint', '转折', 0.20, false],
-        ['climax', '高潮', 0.20, false],
-        ['ending', '结局', 0.20, true],
+        ['opening', '开端'],
+        ['development', '发展'],
+        ['turningPoint', '转折'],
+        ['climax', '高潮'],
+        ['ending', '结局'],
     ];
-    const fixed = labels.reduce((sum, [, label]) => sum + label.length + 2, 0) + labels.length - 1;
-    const available = Math.max(80, limit - fixed);
-    const sections = labels.map(([key, label, weight, preserveEnd]) => ({
+    // The selected short/medium/long mode controls pacing and minimum story
+    // turns, but it must never cut a returned ending or an NSFW node locally.
+    // `limit` remains in the signature for compatibility with saved callers.
+    const sections = labels.map(([key, label]) => ({
         key,
         label,
-        preserveEnd,
         value: text(source[key] ?? source[label]),
-        budget: Math.max(18, Math.floor(available * weight)),
     }));
 
-    let result = sections.map(section => `${section.label}：${trimText(section.value || '（待补充）', section.budget, section.preserveEnd)}`).join('\n');
+    let result = sections.map(section => `${section.label}：${section.value || '（待补充）'}`).join('\n');
     const extras = [
         ['主要 NPC 功能', asList(source.npcFunctions).slice(0, 8).join('；')],
         ['NSFW 节点', asList(source.nsfwNodes).slice(0, 8).join('；')],
         ['硬性规则', asList(source.hardRules).slice(0, 8).join('；')],
     ].filter(([, value]) => value);
-    for (const [label, value] of extras) {
-        const remaining = limit - result.length - 1;
-        if (remaining < label.length + 8) break;
-        result += `\n${label}：${trimText(value, Math.max(1, remaining - label.length - 2), false)}`;
-    }
-    // Never use a blind final slice: it can cut the ending label or its only
-    // sentence when optional metadata was appended above.
-    if (result.length <= limit) return result;
-    const core = sections.map(section => `${section.label}：${trimText(section.value || '（待补充）', section.budget, section.preserveEnd)}`).join('\n');
-    return core.length <= limit ? core : `${core.slice(0, Math.max(0, limit - 1))}…`;
+    return result + extras.map(([label, value]) => `\n${label}：${value}`).join('');
 }
 
 function normalizePersonaData(value) {
@@ -839,7 +829,7 @@ function configMarkup() {
             <div class="sos-field"><label>故事基调</label><div class="sos-segment" data-setting="tone">${['甜文', '虐文', '甜虐交织', '纯黄文'].map(item => `<button type="button" class="${c.tone === item ? 'selected' : ''}" data-value="${item}">${item}</button>`).join('')}</div><small>选择“纯黄文”时，大纲必须把成年角色之间的主动 NSFW 情节作为主线规划。</small></div>
             <div class="sos-field"><label>结局</label><div class="sos-segment" data-setting="ending">${['HE', 'BE', '开放式'].map(item => `<button type="button" class="${c.ending === item ? 'selected' : ''}" data-value="${item}">${item}</button>`).join('')}</div></div>
             <div class="sos-field sos-field-wide"><label>剧情情节关键词（可无限组合）</label><div class="sos-chip-grid" data-sos-scroll="tropes">${selectedChips('tropes', TROPES)}</div><textarea id="sos-custom-tropes" placeholder="自定义剧情关键词">${escapeHtml(c.customTropes)}</textarea></div>
-            <div class="sos-field"><label>故事长度</label><div class="sos-segment" data-setting="length">${Object.entries(LENGTHS).map(([key, item]) => `<button type="button" class="${c.length === key ? 'selected' : ''}" data-value="${key}">${item.label}</button>`).join('')}</div><small>中篇至少保留 20 个 user 交互楼层，长篇至少保留 50 个。</small></div>
+            <div class="sos-field"><label>故事长度</label><div class="sos-segment" data-setting="length">${Object.entries(LENGTHS).map(([key, item]) => `<button type="button" class="${c.length === key ? 'selected' : ''}" data-value="${key}">${item.label}</button>`).join('')}</div><small>这里只控制篇幅倾向和推进节奏，不限制大纲字数。中篇至少保留 20 个 user 交互楼层，长篇至少保留 50 个。</small></div>
             <div class="sos-field"><label>特别想看的情节 / 禁区 / 补充要求</label><textarea id="sos-detail" placeholder="例如：必须有雨夜重逢、不要误会拖太久、某个 NPC 必须先道歉...">${escapeHtml(c.detail)}</textarea></div>
         </section>
         <div class="sos-subsection"><strong>已导入参考角色卡</strong><div class="sos-import-list">${state.importedCharacterReferences.length ? state.importedCharacterReferences.map((reference, index) => `<span>${escapeHtml(reference.name)} <small>（${escapeHtml(reference.source)}）</small> <button type="button" class="sos-remove-character-import" data-index="${index}" title="移除">×</button></span>`).join('') : '<em>暂无。可导入其他角色卡，保留其角色内核、身份逻辑和说话方式，用于平行世界创作。</em>'}</div></div>
@@ -869,7 +859,7 @@ function personaMarkup() {
 function outlineMarkup() {
     const hasOutline = text(state.outline);
     const length = LENGTHS[state.config.length] || LENGTHS.short;
-    return `<div class="sos-section-intro"><span class="sos-kicker">03 / OUTLINE</span><h2>审核剧情大纲</h2><p>目标长度：${length.label}，不超过 ${length.max} 字。接受后才会用于生成 NPC 和剧情。重 roll 或修改会生成新版本，已完成剧情不会回写。</p></div>${generationDiagnosticsMarkup()}
+    return `<div class="sos-section-intro"><span class="sos-kicker">03 / OUTLINE</span><h2>审核剧情大纲</h2><p>故事篇幅：${length.label}。这是节奏和推进密度的倾向，不设本地硬字数上限；AI 必须完整写出开端、发展、转折、高潮、结局、因果链和结局方向。接受后才会用于生成 NPC 和剧情。重 roll 或修改会生成新版本，已完成剧情不会回写。</p></div>${generationDiagnosticsMarkup()}
         <div class="sos-outline-box ${hasOutline ? '' : 'empty'}">${hasOutline ? `<div class="sos-version">版本 ${state.outlineVersion} · ${state.outline.length} 字</div><div id="sos-outline-text">${escapeHtml(state.outline)}</div>` : '<i>还没有大纲。回到配置页生成一份。</i>'}</div>
         <div class="sos-revise"><label>修改意见</label><textarea id="sos-outline-feedback" placeholder="例如：把第三幕改成 user 主动救 NPC，保留已完成部分，只调整后续走向"></textarea></div>
         <div class="sos-actions"><button type="button" class="sos-secondary" data-action="reroll-outline"><i class="fa-solid fa-dice"></i> 直接重 roll</button><button type="button" class="sos-secondary" data-action="revise-outline"><i class="fa-solid fa-pen"></i> 按意见重写</button><button type="button" class="sos-primary" data-action="accept-outline" ${hasOutline ? '' : 'disabled'}><i class="fa-solid fa-check"></i> 接受大纲并生成 NPC</button></div>`;
@@ -1534,7 +1524,7 @@ function generatedErrorMessage(error) {
 function wrapGenerationError(error) {
     const message = generatedErrorMessage(error);
     if (/client network socket disconnected before secure tls connection was established|secure tls connection was established|tls handshake|socket disconnected|econnreset|enotfound|etimedout|network error|failed to fetch|request to .* failed/i.test(message)) {
-        return new Error(`连接上游 API 失败：${message}。这是云酒馆服务器与中转站之间的网络/TLS 连接问题，不是大纲格式错误。请检查 API 地址和路径、中转站状态、云酒馆服务器能否访问该域名，以及是否需要代理或更换节点。`);
+        return new Error(`连接上游 API 失败：${message}。这是当前本地酒馆运行环境与中转站之间的网络/TLS 连接问题，不是大纲格式错误。请检查本机酒馆进程能否访问该域名、API 地址和 /v1 路径是否正确、中转站状态、是否需要让 Node.js 使用代理，以及是否可以更换节点。`);
     }
     if (/\b502\b|bad gateway/i.test(message)) return new Error('酒馆上游 API 返回 502（Bad Gateway），没有生成结果。请检查 API 代理或接口地址；如果输入上下文很大，请先减少角色卡或导入世界书内容后重试。');
     if (/\b(?:400|401|403|404|408|409|413|429|500|503|504)\b|response status/i.test(message)) return new Error(`酒馆上游 API 请求失败：${message}。请检查 API 设置、额度和代理状态。`);
@@ -1590,11 +1580,32 @@ async function generateJson(prompt, schema, responseLength = 1200, { allowText =
         saveGenerationSnapshot(kind, { error: wrapped.message });
         throw wrapped;
     }
-    const raw = extractAssistantContent(result).trim() || extractGeneratedText(result).trim();
-    const parsed = parseGeneratedPayload(raw, allowText, schema);
+    let raw = extractAssistantContent(result).trim() || extractGeneratedText(result).trim();
+    let parsed = parseGeneratedPayload(raw, allowText, schema);
     if (parsed && hasGeneratedShape(parsed, schema)) {
         saveGenerationSnapshot(kind, { raw });
         return parsed;
+    }
+
+    // A few local gateway adapters resolve the first request with no body
+    // even though the generation call itself succeeded. Retry only this
+    // empty-body case; network/TLS failures are thrown above and are never
+    // retried here.
+    if (!raw) {
+        try {
+            const retryResult = await request('\n上一次请求没有返回正文。请重新生成一次，只输出完整结果，不要解释。');
+            raw = extractAssistantContent(retryResult).trim() || extractGeneratedText(retryResult).trim();
+            parsed = parseGeneratedPayload(raw, allowText, schema);
+            if (parsed && hasGeneratedShape(parsed, schema)) {
+                saveGenerationSnapshot(kind, { raw });
+                return parsed;
+            }
+        } catch (error) {
+            const wrappedRetryError = wrapGenerationError(error);
+            repairError = `空响应重试失败：${wrappedRetryError.message}`;
+            saveGenerationSnapshot(kind, { error: repairError });
+            throw wrappedRetryError;
+        }
     }
 
     // One short repair pass handles models that prepend a refusal, code fence,
@@ -1759,8 +1770,12 @@ async function generateOutline(feedback = '', mode = 'new') {
         const revision = mode === 'revise'
             ? `\n用户修改意见：${feedback}\n这是基于当前大纲的局部修订。必须保留未被意见点名的段落、人物事实、关键词落实方式和结局方向；已完成剧情绝不能改写，只调整未完成部分。`
             : '';
-        const prompt = `${basePrompt()}\n任务：生成一份${length.label}小说剧情大纲。输出必须包含开端、发展、转折、高潮、结局五段，按这五段分别填写字段，不能把所有内容塞入单一 outline 字段。先完整规划起承转合和明确结局，再控制篇幅；${length.label}最终显示不超过${length.max}字，但不要为了字数省略结局、因果链或必要事件，超出的压缩由工作台本地处理。每段都要简洁但必须有具体事件、因果和结局。严格落实所有已选背景、关系、基调、结局、情节关键词和特别要求，不得自行删掉标签。另列出主要 NPC 功能、NSFW 节点、硬性规则。${nsfwRule}\n所有人物必须明确为成年人，性行为必须发生在成年人之间并符合用户设定。${previous}${revision}${completed}\n若无法返回 JSON，请使用纯文本标签：<outline>内含“开端：...\n发展：...\n转折：...\n高潮：...\n结局：...”</outline>。`;
-        const result = await generateJson(prompt, outlineSchema(), state.config.length === 'long' ? 5000 : 3200, { allowText: true, patchTag: mode === 'revise' ? 'outline_patch' : '' });
+        const prompt = `${basePrompt()}\n任务：生成一份${length.label}小说剧情大纲。短篇、中篇、长篇只表示整体篇幅倾向、事件密度和推进节奏，不是硬性字数上限；工作台不会从 AI 返回的大纲中截断任何内容。输出必须包含开端、发展、转折、高潮、结局五段，按这五段分别填写字段，不能把所有内容塞入单一 outline 字段。先完整规划起承转合、因果链、高潮和明确结局，再控制叙述密度。不得使用“……”或“...”代替未完成内容，不得因为篇幅省略结局、因果链、关键词落实或 NSFW 节点。每段都要简洁但必须有具体事件、因果和结局。严格落实所有已选背景、关系、基调、结局、情节关键词和特别要求，不得自行删掉标签。另列出主要 NPC 功能、NSFW 节点、硬性规则。${nsfwRule}\n所有人物必须明确为成年人，性行为必须发生在成年人之间并符合用户设定。${previous}${revision}${completed}\n若无法返回 JSON，请使用纯文本标签：<outline>内含“开端：...\n发展：...\n转折：...\n高潮：...\n结局：...”</outline>。`;
+        // Leave enough upstream output budget for a complete five-part outline
+        // and its metadata. The selected length is a pacing hint, not a token
+        // ceiling, and the local formatter no longer truncates the response.
+        const outlineResponseLength = state.config.length === 'long' ? 12000 : 8000;
+        const result = await generateJson(prompt, outlineSchema(), outlineResponseLength, { allowText: true, patchTag: mode === 'revise' ? 'outline_patch' : '' });
         const outlineData = mode === 'revise'
             ? mergeOutlineData(
                 state.outlineData,
@@ -1774,7 +1789,7 @@ async function generateOutline(feedback = '', mode = 'new') {
         if (!outlineData.opening || !outlineData.development || !outlineData.turningPoint || !outlineData.climax || !outlineData.ending) {
             throw new Error('AI 返回的大纲缺少完整的开端、发展、转折、高潮或结局，请重试。');
         }
-        const outline = fitOutlineSections(outlineData, length.max);
+        const outline = fitOutlineSections(outlineData);
         if (!outline) throw new Error('AI 没有返回大纲正文。');
         if (state.outline) {
             state.outlineRevisions.push({ version: state.outlineVersion, outline: state.outline, outlineData: clone(state.outlineData), accepted: state.outlineAccepted, createdAt: Date.now() });
