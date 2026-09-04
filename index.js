@@ -2183,6 +2183,7 @@ async function continueStory() {
         state.completedStorySnapshot = `${state.completedStorySnapshot}\n${content}`.trim().slice(-12000);
         generated.extra = { ...(generated.extra || {}), storyOutlineStudio: { version: state.outlineVersion, turn: state.currentTurn } };
         saveState();
+        await ctx.saveChat?.();
         rerender();
     });
 }
