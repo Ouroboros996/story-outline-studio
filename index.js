@@ -2,7 +2,7 @@ const EXTENSION_ID = 'story-outline-studio';
 const METADATA_KEY = 'storyOutlineStudio';
 const CHAT_WORLD_INFO_KEY = 'world_info';
 const PROMPT_KEY = 'story-outline-studio-continuity';
-const VERSION = 14;
+const VERSION = 15;
 
 // Load core modules after the extension script itself has been evaluated. This
 // avoids the script.js <-> st-context.js cycle preventing the public API from
@@ -88,6 +88,7 @@ let panel = null;
 let generating = false;
 let buttonRetryTimer = null;
 let buttonRetryCount = 0;
+let loadedReferenceWorldBook = { name: '', data: null };
 
 function refreshContext() {
     if (!dependenciesReady || typeof getContext !== 'function') {
@@ -202,26 +203,128 @@ function normalizeNpcCollection(values) {
 }
 
 function ageNumber(value) {
-    const match = text(value).match(/(?:^|\D)(\d{1,3})(?:\s*岁|\s*years?|\s*yo)?/i);
-    return match ? Number(match[1]) : null;
+    return extractAgeNumbers(value)[0] ?? null;
+}
+
+function chineseAgeNumber(value) {
+    const source = text(value).replace(/两/g, '二');
+    if (!source) return null;
+    const digits = { 零: 0, 〇: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+    if (/^[零〇一二三四五六七八九]+$/.test(source)) return Number([...source].map(character => digits[character]).join(''));
+    let total = 0;
+    let section = 0;
+    let number = 0;
+    const units = { 十: 10, 百: 100, 千: 1000, 万: 10000 };
+    for (const character of source) {
+        if (digits[character] !== undefined) {
+            number = digits[character];
+        } else if (units[character]) {
+            const unit = units[character];
+            if (unit === 10000) {
+                section = (section + number) * unit;
+                total += section;
+                section = 0;
+            } else {
+                section += (number || 1) * unit;
+            }
+            number = 0;
+        } else {
+            return null;
+        }
+    }
+    return total + section + number || null;
+}
+
+function extractAgeNumbers(value) {
+    const source = text(value);
+    const numbers = [...source.matchAll(/(?:^|[^\d])(\d{1,4})(?:\s*(?:周岁|岁|years?|yo)(?![\p{L}\d])|(?=\s*(?:余|多)?\s*(?:年|岁)))/giu)]
+        .map(match => Number(match[1]))
+        .filter(Number.isFinite);
+    const chinese = /([零〇一二两三四五六七八九十百千万]{1,10})(?:余|多|几)?\s*(?:周岁|岁|年)/gu;
+    for (const match of source.matchAll(chinese)) {
+        const valueText = match[1];
+        const variants = valueText.match(/^(.*[零〇一二三四五六七八九])([七八九])$/);
+        const parsed = chineseAgeNumber(variants ? variants[1] : valueText);
+        if (parsed !== null) numbers.push(parsed);
+    }
+    return numbers;
 }
 
 function validateAdultNpc(npc) {
-    const age = ageNumber(npc.age);
-    if (age !== null) return age >= 18;
-    return /成年|成人|18\s*以上|十八岁以上|二十|三十|四十|五十|六十|七十|八十|九十/.test(text(npc.age));
+    return validateAdultText(npc.age);
 }
 
 function validateAdultText(value) {
-    const age = ageNumber(value);
-    if (age !== null) return age >= 18;
-    return !/(?:未成年|少年|少女|儿童|孩童|幼年|十[七六五四三二一]岁|\b1[0-7]\s*岁)/i.test(text(value));
+    const source = text(value);
+    const ages = extractAgeNumbers(source);
+    // Do not reject words such as "少年" or "未成年" by themselves. They
+    // commonly occur in boundaries, exclusions, or historical descriptions
+    // and are not reliable evidence of the current character's age. An
+    // explicit numeric age below 18 is still blocked for adult-only output.
+    return !ages.some(age => age < 18);
+}
+
+function generationNonce(kind = 'generation', attempt = 0) {
+    let random = '';
+    try { random = globalThis.crypto?.randomUUID?.() || ''; } catch { /* older embedded browsers may not expose crypto */ }
+    if (!random) random = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+    return `sos-${kind}-${attempt + 1}-${random}`;
+}
+
+function canonicalText(value) {
+    return text(value).toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+}
+
+function outlineSignature(data) {
+    const normalized = normalizeOutlineData(data);
+    return canonicalText(['opening', 'development', 'turningPoint', 'climax', 'ending', 'npcFunctions', 'nsfwNodes', 'hardRules']
+        .map(key => Array.isArray(normalized[key]) ? normalized[key].join('|') : normalized[key]).join('|'));
+}
+
+function textSimilarity(first, second) {
+    const a = canonicalText(first);
+    const b = canonicalText(second);
+    if (!a || !b) return 0;
+    if (a === b) return 1;
+    const grams = value => new Set([...value].map((_, index) => value.slice(index, index + 3)).filter(gram => gram.length === 3));
+    const firstSet = grams(a);
+    const secondSet = grams(b);
+    if (!firstSet.size || !secondSet.size) return 0;
+    let overlap = 0;
+    for (const gram of firstSet) if (secondSet.has(gram)) overlap++;
+    return overlap / (firstSet.size + secondSet.size - overlap);
+}
+
+function hasDuplicateOutline(next, history) {
+    const signature = outlineSignature(next);
+    return history.some(item => signature && outlineSignature(item) === signature || textSimilarity(next, item) >= 0.72);
+}
+
+function worldBookSortKey(name) {
+    const source = [...text(name)][0] || '';
+    if (/^\p{Extended_Pictographic}/u.test(source) || /^[\u{1F1E6}-\u{1F1FF}]/u.test(source)) return 0;
+    if (/^\p{Number}/u.test(source)) return 1;
+    return 2;
+}
+
+function compareWorldBookNames(first, second) {
+    const firstText = text(first);
+    const secondText = text(second);
+    const category = worldBookSortKey(firstText) - worldBookSortKey(secondText);
+    if (category) return category;
+    if (worldBookSortKey(firstText) === 0) {
+        const firstCodePoint = [...firstText][0]?.codePointAt(0) || 0;
+        const secondCodePoint = [...secondText][0]?.codePointAt(0) || 0;
+        if (firstCodePoint !== secondCodePoint) return firstCodePoint - secondCodePoint;
+    }
+    const collator = new Intl.Collator('zh-Hans-CN-u-co-pinyin', { sensitivity: 'base', numeric: true });
+    return collator.compare(firstText, secondText) || firstText.localeCompare(secondText);
 }
 
 function validateNpc(npc) {
     const missing = ['name', 'age', 'appearance', 'personality', 'identity', 'relationship'].filter(field => !text(npc[field]));
     if (missing.length) return `NPC「${npc.name || '未命名'}」缺少：${missing.join('、')}`;
-    if (!validateAdultNpc(npc)) return `NPC「${npc.name}」的年龄不是明确的成年人年龄，请修改为 18 岁以上。`;
+    if (!validateAdultNpc(npc)) return `NPC「${npc.name}」包含明确的未满 18 岁年龄，不能用于成人内容。`;
     return '';
 }
 
@@ -252,8 +355,10 @@ function defaultState() {
         outlineVersion: 0,
         outlineAccepted: false,
         outlineRevisions: [],
+        outlineGenerationHistory: [],
         npcs: [],
         npcsAccepted: false,
+        npcNameHistory: [],
         importedCharacterReferences: [],
         importedWorldBooks: [],
         currentTurn: 0,
@@ -261,6 +366,7 @@ function defaultState() {
         completedStorySnapshot: '',
         completedStoryMessages: 0,
         worldBookName: '',
+        referenceWorldBookName: '',
         attachedWorldBookName: '',
         lastGeneratedAt: 0,
         lastGeneration: {
@@ -290,6 +396,11 @@ function getState() {
         next.outlineData = normalizeOutlineData({ outline: next.outline }, next.outline);
     }
     next.outlineRevisions = Array.isArray(next.outlineRevisions) ? next.outlineRevisions : [];
+    next.outlineGenerationHistory = Array.isArray(next.outlineGenerationHistory)
+        ? next.outlineGenerationHistory.map(item => normalizeOutlineData(item)).filter(item => outlineSignature(item))
+        : [];
+    next.npcNameHistory = unique(next.npcNameHistory);
+    next.referenceWorldBookName = text(next.referenceWorldBookName);
     next.lastGeneration = next.lastGeneration && typeof next.lastGeneration === 'object'
         ? {
             kind: text(next.lastGeneration.kind),
@@ -904,7 +1015,7 @@ function validatePersona(persona) {
     const missing = ['name', 'gender', 'age', 'appearance', 'personality', 'identity', 'past', 'habits', 'boundaries']
         .filter(field => !normalized[field]);
     if (missing.length) return `user 人设缺少：${missing.join('、')}`;
-    if (!validateAdultText(normalized.age)) return 'user 人设年龄不是明确的成年人年龄';
+    if (!validateAdultText(normalized.age)) return 'user 人设包含明确的未满 18 岁年龄，不能用于成人内容';
     return '';
 }
 
@@ -920,6 +1031,8 @@ function customValues(category) {
 
 function configMarkup() {
     const c = state.config;
+    const availableWorldBooks = getAvailableWorldBookNames();
+    const selectedWorldBook = selectedReferenceWorldBookName();
     return `
         <div class="sos-section-intro"><span class="sos-kicker">01 / CONFIGURE</span><h2>先定义你想读的故事</h2><p>标签可以叠加，未列出的内容直接写进自定义栏。大纲和 NPC 使用酒馆当前选中的 API、模型、生成预设及世界信息流程；工作台配置作为额外约束发送，不会把预设 JSON 文本重复拼接。</p></div>
         ${generationDiagnosticsMarkup()}
@@ -937,7 +1050,7 @@ function configMarkup() {
             <div class="sos-field"><label>特别想看的情节 / 禁区 / 补充要求</label><textarea id="sos-detail" placeholder="例如：必须有雨夜重逢、不要误会拖太久、某个 NPC 必须先道歉...">${escapeHtml(c.detail)}</textarea></div>
         </section>
         <div class="sos-subsection"><strong>已导入参考角色卡</strong><div class="sos-import-list">${state.importedCharacterReferences.length ? state.importedCharacterReferences.map((reference, index) => `<span>${escapeHtml(reference.name)} <small>（${escapeHtml(reference.source)}）</small> <button type="button" class="sos-remove-character-import" data-index="${index}" title="移除">×</button></span>`).join('') : '<em>暂无。可导入其他角色卡，保留其角色内核、身份逻辑和说话方式，用于平行世界创作。</em>'}</div></div>
-        <div class="sos-subsection"><strong>已导入参考世界书</strong><div class="sos-import-list">${state.importedWorldBooks.length ? state.importedWorldBooks.map((book, index) => `<span>${escapeHtml(book.name)} <button type="button" class="sos-remove-worldbook-import" data-index="${index}" title="移除">×</button></span>`).join('') : '<em>暂无。可以导入其他角色卡的世界书，用作平行世界参考。</em>'}</div><label class="sos-file-button"><i class="fa-solid fa-file-import"></i> 导入 JSON 世界书 / 角色卡<input id="sos-worldbook-file" type="file" accept=".json,application/json" hidden></label><div class="sos-actions sos-import-actions"><button type="button" class="sos-secondary" data-action="attach-reference-worldbook"><i class="fa-solid fa-link"></i> 创建并挂载平行 IF 世界书</button></div><small>${state.attachedWorldBookName ? `当前聊天已挂载：${escapeHtml(state.attachedWorldBookName)}` : '挂载后，酒馆本身会把合并世界书放入每次正常 AI 请求的 World Info 上下文。'}</small></div>
+        <div class="sos-subsection"><strong>参考世界书</strong><div class="sos-worldbook-source"><label for="sos-reference-worldbook">按酒馆现有世界书查询</label><select id="sos-reference-worldbook"><option value="">${availableWorldBooks.length ? '不使用外部世界书' : '酒馆当前没有已导入世界书'}</option>${availableWorldBooks.map(name => `<option value="${escapeHtml(name)}" ${selectedWorldBook === name ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('')}</select><small>${selectedWorldBook ? `当前将读取“${escapeHtml(selectedWorldBook)}”中的 NPC 和世界设定。` : '如果当前角色已绑定世界书，会自动优先使用绑定的世界书；也可以在这里选择其他已导入世界书。'}</small></div><div class="sos-import-list">${state.importedWorldBooks.length ? state.importedWorldBooks.map((book, index) => `<span>${escapeHtml(book.name)} <button type="button" class="sos-remove-worldbook-import" data-index="${index}" title="移除">×</button></span>`).join('') : '<em>暂无本地文件参考。现有世界书不需要上传源文件即可查询。</em>'}</div><label class="sos-file-button"><i class="fa-solid fa-file-import"></i> 导入 JSON 世界书 / 角色卡<input id="sos-worldbook-file" type="file" accept=".json,application/json" hidden></label><div class="sos-actions sos-import-actions"><button type="button" class="sos-secondary" data-action="attach-reference-worldbook"><i class="fa-solid fa-link"></i> 创建并挂载平行 IF 世界书</button></div><small>${state.attachedWorldBookName ? `当前聊天已挂载：${escapeHtml(state.attachedWorldBookName)}` : '挂载按钮只用于把文件参考合并成酒馆可用的平行世界书，不会修改被查询的原世界书。'}</small></div>
         <div class="sos-actions"><button type="button" class="sos-primary" data-action="generate-outline"><i class="fa-solid fa-wand-magic-sparkles"></i> ${state.outline ? '重新生成大纲' : '生成剧情大纲'}</button></div>`;
 }
 
@@ -954,8 +1067,9 @@ function generationDiagnosticsMarkup() {
 
 function personaMarkup() {
     const existing = text(power_user.persona_description);
-    return `<div class="sos-section-intro"><span class="sos-kicker">02 / USER PERSONA</span><h2>确认 user 的人设</h2><p>${existing ? '检测到酒馆已有 user 人设。你可以直接采用，也可以在这里为本故事建立独立版本。' : '当前没有检测到酒馆 user 人设。先生成一份成年人角色设定，后续大纲和剧情都会使用它。'}</p></div>${generationDiagnosticsMarkup()}
-        <div class="sos-persona-box"><textarea id="sos-persona" placeholder="用户人设会显示在这里">${escapeHtml(state.userPersona || existing)}</textarea><div class="sos-persona-meta">${state.userPersonaAccepted ? '<span class="sos-ok">已接受</span>' : '<span>尚未接受</span>'}</div></div>
+    const displayedPersona = state.userPersona || personaToText(state.userPersonaData) || existing;
+    return `<div class="sos-section-intro"><span class="sos-kicker">02 / USER PERSONA</span><h2>确认 user 的人设</h2><p>${existing ? '检测到酒馆已有 user 人设。你可以直接采用，也可以在这里为本故事建立独立版本。' : '当前没有检测到酒馆 user 人设。先生成一份角色设定，后续大纲和剧情都会使用它。'}</p></div>${generationDiagnosticsMarkup()}
+        <div class="sos-persona-box"><textarea id="sos-persona" placeholder="用户人设会显示在这里">${escapeHtml(displayedPersona)}</textarea><div class="sos-persona-meta">${state.userPersonaAccepted ? '<span class="sos-ok">已接受</span>' : '<span>尚未接受</span>'}</div></div>
         <div class="sos-revise"><label>人设修改意见</label><textarea id="sos-persona-feedback" placeholder="例如：保留姓名和职业，把性格改得更寡言，补充右手旧伤；未提到的字段保持不变"></textarea></div>
         <div class="sos-actions"><button type="button" class="sos-secondary" data-action="reroll-persona"><i class="fa-solid fa-dice"></i> 直接重 roll</button><button type="button" class="sos-secondary" data-action="revise-persona"><i class="fa-solid fa-pen"></i> 按意见修改</button><button type="button" class="sos-primary" data-action="accept-persona"><i class="fa-solid fa-check"></i> 接受这份人设并继续</button></div>`;
 }
@@ -977,12 +1091,12 @@ function npcField(label, value, index, field, multiline = false) {
 }
 
 function npcMarkup() {
-    const cards = state.npcs.map((npc, index) => `<article class="sos-npc-card"><header><input data-npc-index="${index}" data-npc-field="name" value="${escapeHtml(npc.name)}"><button type="button" class="sos-icon-button" data-action="delete-npc" data-index="${index}" title="删除 NPC"><i class="fa-solid fa-trash"></i></button></header><div class="sos-npc-grid">${npcField('称呼 / 关键词', asArray(npc.aliases).join('、'), index, 'aliases', true)}${npcField('性别', npc.gender, index, 'gender')}${npcField('年龄（必须成年）', npc.age, index, 'age')}${npcField('身高', npc.height, index, 'height')}${npcField('外貌与辨识度特征', npc.appearance, index, 'appearance', true)}${npcField('性格', npc.personality, index, 'personality', true)}${npcField('身份背景', npc.identity, index, 'identity', true)}${npcField('过去经历', npc.past, index, 'past', true)}${npcField('与 user 的关系', npc.relationship, index, 'relationship', true)}${npcField('对 user 的态度', npc.attitude, index, 'attitude', true)}${npcField('典型语录', asArray(npc.quotes).join('\n'), index, 'quotes', true)}${npcField('NSFW 偏好 / 体位 / 语言风格', npc.nsfw, index, 'nsfw', true)}${npcField('成年身体信息（男性可填写）', npc.body, index, 'body', true)}</div></article>`).join('');
+    const cards = state.npcs.map((npc, index) => `<article class="sos-npc-card"><header><input data-npc-index="${index}" data-npc-field="name" value="${escapeHtml(npc.name)}"><button type="button" class="sos-icon-button" data-action="delete-npc" data-index="${index}" title="删除 NPC"><i class="fa-solid fa-trash"></i></button></header><div class="sos-npc-grid">${npcField('称呼 / 关键词', asArray(npc.aliases).join('、'), index, 'aliases', true)}${npcField('性别', npc.gender, index, 'gender')}${npcField('年龄', npc.age, index, 'age')}${npcField('身高', npc.height, index, 'height')}${npcField('外貌与辨识度特征', npc.appearance, index, 'appearance', true)}${npcField('性格', npc.personality, index, 'personality', true)}${npcField('身份背景', npc.identity, index, 'identity', true)}${npcField('过去经历', npc.past, index, 'past', true)}${npcField('与 user 的关系', npc.relationship, index, 'relationship', true)}${npcField('对 user 的态度', npc.attitude, index, 'attitude', true)}${npcField('典型语录', asArray(npc.quotes).join('\n'), index, 'quotes', true)}${npcField('NSFW 偏好 / 体位 / 语言风格', npc.nsfw, index, 'nsfw', true)}${npcField('身体信息（可填写）', npc.body, index, 'body', true)}</div></article>`).join('');
     const draftIssues = state.npcs.map(validateNpc).filter(Boolean);
     const draftNotice = draftIssues.length
         ? `<div class="sos-empty">AI 返回了可识别但不完整的 NPC 草稿，已先保留到列表。接受前请补全：${escapeHtml(draftIssues.join('；'))}</div>`
         : '';
-    return `<div class="sos-section-intro"><span class="sos-kicker">04 / NPC CAST</span><h2>审核主要 NPC</h2><p>每名 NPC 都必须是成年人。请检查外貌辨识度、经历与性格的因果关系，以及对 user 的态度。接受后会写入当前角色绑定的世界书。</p></div>${generationDiagnosticsMarkup()}${draftNotice}<div class="sos-npc-list">${cards || '<div class="sos-empty">尚未生成 NPC。请先接受大纲。</div>'}</div><div class="sos-revise"><label>NPC 修改意见</label><textarea id="sos-npc-feedback" placeholder="例如：只修改第二名 NPC 的态度和过去经历，保留其他 NPC 及其余字段；补充一个右耳耳钉的辨识特征"></textarea></div><div class="sos-actions"><button type="button" class="sos-secondary" data-action="reroll-npc"><i class="fa-solid fa-dice"></i> 直接重 roll</button><button type="button" class="sos-secondary" data-action="revise-npc" ${cards ? '' : 'disabled'}><i class="fa-solid fa-pen"></i> 按意见修改</button><button type="button" class="sos-primary" data-action="accept-npc" ${cards ? '' : 'disabled'}><i class="fa-solid fa-book"></i> 接受并写入世界书</button></div>`;
+    return `<div class="sos-section-intro"><span class="sos-kicker">04 / NPC CAST</span><h2>审核主要 NPC</h2><p>请检查外貌辨识度、经历与性格的因果关系，以及对 user 的态度。接受后会写入当前角色绑定的世界书。</p></div>${generationDiagnosticsMarkup()}${draftNotice}<div class="sos-npc-list">${cards || '<div class="sos-empty">尚未生成 NPC。请先接受大纲。</div>'}</div><div class="sos-revise"><label>NPC 修改意见</label><textarea id="sos-npc-feedback" placeholder="例如：只修改第二名 NPC 的态度和过去经历，保留其他 NPC 及其余字段；补充一个右耳耳钉的辨识特征"></textarea></div><div class="sos-actions"><button type="button" class="sos-secondary" data-action="reroll-npc"><i class="fa-solid fa-dice"></i> 直接重 roll</button><button type="button" class="sos-secondary" data-action="revise-npc" ${cards ? '' : 'disabled'}><i class="fa-solid fa-pen"></i> 按意见修改</button><button type="button" class="sos-primary" data-action="accept-npc" ${cards ? '' : 'disabled'}><i class="fa-solid fa-book"></i> 接受并写入世界书</button></div>`;
 }
 
 function storyMarkup() {
@@ -1127,6 +1241,14 @@ function bindPanelEvents() {
         setCustomValues();
         saveState();
     });
+    panel.querySelector('#sos-reference-worldbook')?.addEventListener('change', async event => {
+        try {
+            await selectReferenceWorldBook(event.target.value);
+        } catch (error) {
+            toastr.error(error.message || '读取世界书失败');
+            rerender();
+        }
+    });
     panel.querySelectorAll('[data-npc-field]').forEach(input => input.addEventListener('input', () => {
         const npc = state.npcs[Number(input.dataset.npcIndex)];
         if (!npc) return;
@@ -1196,6 +1318,56 @@ function configPayload() {
     };
 }
 
+function getAvailableWorldBookNames() {
+    refreshContext();
+    const names = typeof ctx.getWorldInfoNames === 'function' ? ctx.getWorldInfoNames() : [];
+    return [...new Set(names.map(text).filter(Boolean))].sort(compareWorldBookNames);
+}
+
+function getLinkedReferenceWorldBookName() {
+    const characterBook = getWorldBookTarget();
+    if (characterBook) return characterBook;
+    return text(ctx.chatMetadata?.[CHAT_WORLD_INFO_KEY]);
+}
+
+function selectedReferenceWorldBookName() {
+    const bound = getLinkedReferenceWorldBookName();
+    if (bound) return bound;
+    const selected = text(state.referenceWorldBookName);
+    return selected && getAvailableWorldBookNames().includes(selected) ? selected : '';
+}
+
+async function ensureReferenceWorldBookLoaded() {
+    const selected = selectedReferenceWorldBookName();
+    if (!selected) {
+        loadedReferenceWorldBook = { name: '', data: null };
+        return;
+    }
+    if (loadedReferenceWorldBook.name === selected && loadedReferenceWorldBook.data) return;
+    const data = await loadWorldInfo(selected);
+    if (!data || !data.entries || typeof data.entries !== 'object') throw new Error(`无法读取世界书“${selected}”。`);
+    loadedReferenceWorldBook = { name: selected, data };
+}
+
+async function selectReferenceWorldBook(name) {
+    const requested = text(name);
+    const available = getAvailableWorldBookNames();
+    if (!requested) {
+        state.referenceWorldBookName = '';
+        loadedReferenceWorldBook = { name: '', data: null };
+        saveState();
+        rerender();
+        return;
+    }
+    if (!available.includes(requested)) throw new Error('找不到所选世界书，可能已被删除；请刷新后重新选择。');
+    const data = await loadWorldInfo(requested);
+    if (!data || !data.entries || typeof data.entries !== 'object') throw new Error(`无法读取世界书“${requested}”。`);
+    state.referenceWorldBookName = requested;
+    loadedReferenceWorldBook = { name: requested, data };
+    saveState();
+    rerender();
+}
+
 function currentCharacterContext() {
     refreshContext();
     const character = ctx.characterId !== undefined ? ctx.characters?.[ctx.characterId] : null;
@@ -1225,6 +1397,24 @@ function referenceBooksText() {
         }
         if (entries.length) books.push(`<reference_worldbook name="${escapeHtml(book.name)}">${entries.join('')}\n</reference_worldbook>`);
         if (used >= maxTotal) break;
+    }
+    const selected = selectedReferenceWorldBookName();
+    if (selected) {
+        const data = loadedReferenceWorldBook.name === selected ? loadedReferenceWorldBook.data : null;
+        if (data?.entries && typeof data.entries === 'object') {
+            const entries = [];
+            for (const entry of Object.values(data.entries)) {
+                const remaining = maxTotal - used;
+                if (remaining <= 0) break;
+                const content = limitPromptText(entry?.content, Math.max(120, Math.min(1800, remaining - 80)));
+                if (!content) continue;
+                const keys = unique([...asList(entry?.key), ...asList(entry?.keysecondary)]);
+                const part = `\n[${keys.join('、') || '无关键词'}] ${content}`;
+                entries.push(part);
+                used += part.length;
+            }
+            if (entries.length) books.push(`<linked_worldbook name="${escapeHtml(selected)}">${entries.join('')}\n</linked_worldbook>`);
+        }
     }
     return books.join('\n');
 }
@@ -1720,7 +1910,7 @@ async function generateJson(prompt, schema, responseLength = 1200, { allowText =
     const schemaInstruction = `\n字段参考（不要输出 schema）：${JSON.stringify(generationSchema)}\n${patchProtocol}不要输出解释、Markdown 或思维链。若你能稳定返回 JSON，也可以返回单个 JSON 对象。`;
     const request = async extraPrompt => {
         const params = {
-            quietPrompt: `${prompt}${schemaInstruction}${extraPrompt || ''}\n所有人物必须明确为成年人。`,
+            quietPrompt: `${prompt}${schemaInstruction}${extraPrompt || ''}\n涉及成人内容时，参与者必须是成年人。`,
             responseLength,
             skipWIAN: false,
         };
@@ -1856,7 +2046,7 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
             ctx.chat.push(temporaryUserMessage);
         }
         const result = await ctx.generate('normal', {
-            quiet_prompt: `${prompt}${schemaInstruction}\n所有人物必须明确为成年人。`,
+            quiet_prompt: `${prompt}${schemaInstruction}\n涉及成人内容时，参与者必须是成年人。`,
             quietToLoud: true,
             skipWIAN: false,
             force_name2: true,
@@ -1967,6 +2157,7 @@ async function startOutline() {
 
 async function generatePersona(feedback = '', mode = 'new') {
     await withGenerating(async () => {
+        await ensureReferenceWorldBookLoaded();
         const editedPersona = text(document.getElementById('sos-persona')?.value);
         if (editedPersona) {
             state.userPersona = editedPersona;
@@ -1979,13 +2170,16 @@ async function generatePersona(feedback = '', mode = 'new') {
         const previousPersona = state.userPersonaData && Object.values(state.userPersonaData).some(Boolean)
             ? JSON.stringify(state.userPersonaData)
             : text(state.userPersona);
-        const previous = previousPersona
-            ? `\n当前 user 人设草稿（这是本次重生成的基线；除非特别要求，不要改动已有字段）：${previousPersona}`
+        const previous = mode === 'revise' && previousPersona
+            ? `\n当前 user 人设草稿（这是本次修改的基线；除非特别要求，不要改动已有字段）：${previousPersona}`
             : '';
         const revision = mode === 'revise'
             ? `\n用户修改意见：${feedback}\n这是局部修改，不是重新创作。只修改意见明确点名的字段或内容；未点名的姓名、年龄、外貌、性格、身份、经历、习惯、边界必须逐字保留。输出仍须包含完整字段。`
             : '';
-        const prompt = `${basePrompt()}\n请生成 user 的故事人设。必须返回完整字段：name、gender、age、appearance、personality、identity、past、habits、boundaries。年龄必须 >= 18，设定要和配置的背景、性别方向、剧情标签兼容。${previous}${revision}\n保留基线中未被明确要求修改的内容；不要返回空字段。若无法返回 JSON，请输出 <persona> 标签，标签内每行一个“字段：内容”。`;
+        const novelty = mode === 'new'
+            ? `\n这是全新生成，不是对旧人设润色。随机生成标识：${generationNonce('persona')}。请更换姓名、成长经历、职业细节和辨识度特征，不要复用当前草稿。`
+            : '';
+        const prompt = `${basePrompt()}\n请生成 user 的故事人设。必须返回完整字段：name、gender、age、appearance、personality、identity、past、habits、boundaries。设定要和配置的背景、性别方向、剧情标签兼容；如果故事包含成人内容，年龄字段必须明确为成年人。${previous}${revision}${novelty}\n保留基线中未被明确要求修改的内容；不要返回空字段。若无法返回 JSON，请输出 <persona> 标签，标签内每行一个“字段：内容”。`;
         const result = await generateJson(prompt, { type: 'object', properties: { name: { type: 'string' }, gender: { type: 'string' }, age: { type: 'string' }, appearance: { type: 'string' }, personality: { type: 'string' }, identity: { type: 'string' }, past: { type: 'string' }, habits: { type: 'string' }, boundaries: { type: 'string' } }, required: ['name', 'gender', 'age', 'appearance', 'personality', 'identity', 'past', 'habits', 'boundaries'] }, 1800, { allowText: true, patchTag: mode === 'revise' ? 'persona_patch' : '' });
         const nextPersona = mode === 'revise'
             ? mergePersonaData(
@@ -2017,10 +2211,12 @@ async function revisePersona() {
 async function acceptPersona() {
     const value = text(document.getElementById('sos-persona')?.value);
     if (!value) return toastr.warning('请先填写 user 人设。');
-    if (!validateAdultText(value)) return toastr.warning('user 人设必须明确为成年人，不能包含未成年设定。');
-    state.userPersona = value;
     const parsedPersona = parseKeyValueBlock(value);
-    state.userPersonaData = Object.values(parsedPersona).some(Boolean) ? normalizePersonaData(parsedPersona) : {};
+    const normalized = Object.values(parsedPersona).some(Boolean) ? normalizePersonaData(parsedPersona) : normalizePersonaData(value);
+    const ageIssue = validatePersona(normalized);
+    if (ageIssue) return toastr.warning(`${ageIssue}。`);
+    state.userPersonaData = normalized;
+    state.userPersona = personaToText(normalized) || value;
     state.userPersonaAccepted = true;
     saveState();
     await generateOutline();
@@ -2047,43 +2243,64 @@ function outlineSchema() {
 
 async function generateOutline(feedback = '', mode = 'new') {
     await withGenerating(async () => {
+        await ensureReferenceWorldBookLoaded();
         const length = LENGTHS[state.config.length] || LENGTHS.short;
         const completed = state.completedStorySnapshot ? `\n已完成剧情（只可作为历史，不得改写）：${state.completedStorySnapshot}` : '';
         const nsfwRule = state.config.tone === '纯黄文'
             ? '故事基调为“纯黄文”：NSFW 是主轴，至少规划 3 个有剧情功能的成年角色亲密节点，并写明所属阶段、主动方、关系推进和对应关键词。'
             : '无论甜文、虐文还是甜虐交织，都必须至少安排 1 个成年角色之间、具有剧情功能的 NSFW 节点；甜文用于关系推进，虐文用于冲突或代价，甜虐交织用于转折或和解。若已选强制爱、囚禁、黑化、金丝雀等成人标签，应安排多个节点。';
-        const previous = state.outlineData && Object.values(state.outlineData).some(value => Array.isArray(value) ? value.length : value)
+        const previous = mode === 'revise' && state.outlineData && Object.values(state.outlineData).some(value => Array.isArray(value) ? value.length : value)
             ? `\n当前大纲基线（修改必须基于此版本）：${JSON.stringify(state.outlineData)}\n当前大纲显示文本：${state.outline}`
+            : '';
+        const outlineHistory = [...state.outlineGenerationHistory, ...(state.outlineData && outlineSignature(state.outlineData) ? [state.outlineData] : [])];
+        const noveltyHistory = mode === 'new'
+            ? outlineHistory.slice(-5).map(item => fitOutlineSections(item)).join('\n---历史版本分隔---\n')
+            : '';
+        const novelty = mode === 'new'
+            ? `\n这是全新剧情路线，不是对旧大纲换词。随机生成标识：${generationNonce('outline')}。必须更换核心冲突、关键场景、因果链、高潮解决方式和至少一个主要 NPC 设计；严禁复用下面历史大纲的剧情结构或句子：\n${limitPromptText(noveltyHistory, 10000) || '暂无历史版本'}`
             : '';
         const revision = mode === 'revise'
             ? `\n用户修改意见：${feedback}\n这是基于当前大纲的局部修订。必须保留未被意见点名的段落、人物事实、关键词落实方式和结局方向；已完成剧情绝不能改写，只调整未完成部分。`
             : '';
-        const prompt = `${basePrompt()}\n任务：生成一份${length.label}小说剧情大纲。短篇、中篇、长篇只表示整体篇幅倾向、事件密度和推进节奏，不是硬性字数上限；工作台不会从 AI 返回的大纲中截断任何内容。输出必须包含开端、发展、转折、高潮、结局五段，按这五段分别填写字段，不能把所有内容塞入单一 outline 字段。先完整规划起承转合、因果链、高潮和明确结局，再控制叙述密度。不得使用“……”或“...”代替未完成内容，不得因为篇幅省略结局、因果链、关键词落实或 NSFW 节点。每段都要简洁但必须有具体事件、因果和结局。严格落实所有已选背景、关系、基调、结局、情节关键词和特别要求，不得自行删掉标签。另列出主要 NPC 功能、NSFW 节点、硬性规则。${nsfwRule}\n所有人物必须明确为成年人，性行为必须发生在成年人之间并符合用户设定。${previous}${revision}${completed}\n若无法返回 JSON，请使用纯文本标签：<outline>内含“开端：...\n发展：...\n转折：...\n高潮：...\n结局：...”</outline>。`;
+        const prompt = `${basePrompt()}\n任务：生成一份${length.label}小说剧情大纲。短篇、中篇、长篇只表示整体篇幅倾向、事件密度和推进节奏，不是硬性字数上限；工作台不会从 AI 返回的大纲中截断任何内容。输出必须包含开端、发展、转折、高潮、结局五段，按这五段分别填写字段，不能把所有内容塞入单一 outline 字段。先完整规划起承转合、因果链、高潮和明确结局，再控制叙述密度。不得使用“……”或“...”代替未完成内容，不得因为篇幅省略结局、因果链、关键词落实或 NSFW 节点。每段都要简洁但必须有具体事件、因果和结局。严格落实所有已选背景、关系、基调、结局、情节关键词和特别要求，不得自行删掉标签。另列出主要 NPC 功能、NSFW 节点、硬性规则。${nsfwRule}\n所有人物必须明确为成年人，性行为必须发生在成年人之间并符合用户设定。${previous}${novelty}${revision}${completed}\n若无法返回 JSON，请使用纯文本标签：<outline>内含“开端：...\n发展：...\n转折：...\n高潮：...\n结局：...”</outline>。`;
         // Leave enough upstream output budget for a complete five-part outline
         // and its metadata. The selected length is a pacing hint, not a token
         // ceiling, and the local formatter no longer truncates the response.
         const outlineResponseLength = state.config.length === 'long' ? 12000 : 8000;
-        const result = await generateStructured(prompt, outlineSchema(), outlineResponseLength, { allowText: true, patchTag: mode === 'revise' ? 'outline_patch' : '' });
-        const outlineData = mode === 'revise'
-            ? mergeOutlineData(
-                state.outlineData,
-                (() => {
-                    const next = normalizeOutlineData(result, result.outline ? '' : text(result));
-                    const restricted = restrictOutlineRevision(next, feedback);
-                    return Object.keys(restricted).length ? restricted : diffOutlineFields(state.outlineData, next);
-                })(),
-            )
-            : normalizeOutlineData(result, result.outline ? '' : text(result));
-        if (!outlineData.opening || !outlineData.development || !outlineData.turningPoint || !outlineData.climax || !outlineData.ending) {
-            throw new Error('AI 返回的大纲缺少完整的开端、发展、转折、高潮或结局，请重试。');
+        let outlineData = null;
+        let outline = '';
+        for (let attempt = 0; attempt < (mode === 'new' ? 3 : 1); attempt++) {
+            const attemptPrompt = attempt
+                ? `${prompt}\n上一次返回的大纲与历史版本过于相似。请彻底更换冲突、场景顺序、因果链、高潮和结局落点，重新输出完整五段；本次重试标识：${generationNonce('outline-retry', attempt)}。`
+                : prompt;
+            const result = await generateStructured(attemptPrompt, outlineSchema(), outlineResponseLength, { allowText: true, patchTag: mode === 'revise' ? 'outline_patch' : '' });
+            const candidate = mode === 'revise'
+                ? mergeOutlineData(
+                    state.outlineData,
+                    (() => {
+                        const next = normalizeOutlineData(result, result.outline ? '' : text(result));
+                        const restricted = restrictOutlineRevision(next, feedback);
+                        return Object.keys(restricted).length ? restricted : diffOutlineFields(state.outlineData, next);
+                    })(),
+                )
+                : normalizeOutlineData(result, result.outline ? '' : text(result));
+            if (!candidate.opening || !candidate.development || !candidate.turningPoint || !candidate.climax || !candidate.ending) {
+                throw new Error('AI 返回的大纲缺少完整的开端、发展、转折、高潮或结局，请重试。');
+            }
+            if (mode === 'new' && hasDuplicateOutline(candidate, outlineHistory)) continue;
+            outlineData = candidate;
+            outline = fitOutlineSections(candidate);
+            break;
         }
-        const outline = fitOutlineSections(outlineData);
-        if (!outline) throw new Error('AI 没有返回大纲正文。');
+        if (!outlineData || !outline) throw new Error('AI 返回的大纲与历史版本过于相似，已自动重试仍未得到新路线；本次结果未覆盖当前大纲。');
         if (state.outline) {
             state.outlineRevisions.push({ version: state.outlineVersion, outline: state.outline, outlineData: clone(state.outlineData), accepted: state.outlineAccepted, createdAt: Date.now() });
         }
         state.outlineData = outlineData;
         state.outline = outline;
+        if (mode === 'new') {
+            state.outlineGenerationHistory = [...outlineHistory, clone(outlineData)].slice(-8);
+        }
         state.outlineVersion += 1;
         state.outlineAccepted = false;
         state.npcsAccepted = false;
@@ -2109,10 +2326,15 @@ async function acceptOutline() {
 
 async function generateNpcs(feedback = '', mode = 'new') {
     await withGenerating(async () => {
+        await ensureReferenceWorldBookLoaded();
         if (!state.outlineAccepted) return toastr.warning('请先接受大纲。');
-        const previous = state.npcs.length
+        const previous = mode === 'revise' && state.npcs.length
             ? `\n当前 NPC 草稿（本次重生成的基线；除非用户明确要求，不要改变姓名、身份、核心性格、关系和说话方式）：${JSON.stringify(state.npcs)}`
             : '\n当前没有 NPC 草稿，请根据大纲生成全部主要 NPC。';
+        const previousNames = unique([...state.npcNameHistory, ...state.npcs.flatMap(npc => [npc.name, ...npc.aliases])]);
+        const novelty = mode === 'new'
+            ? `\n这是全新 NPC 阵容，不是对当前草稿换词。随机生成标识：${generationNonce('npc')}。每名 NPC 必须采用全新的姓名，严禁使用以下历史姓名或其同音/近似写法：${previousNames.join('、') || '暂无'}。人物身份、核心矛盾、外貌辨识度和说话方式也要与历史阵容明显不同。`
+            : '';
         const revision = mode === 'revise'
             ? `\n用户 NPC 修改意见：${feedback}\n这是基于当前 NPC 草稿的局部修改，不是全部重写。只修改意见明确点名的 NPC、字段或内容；未点名的 NPC 以及未点名字段必须保持原值，尤其是姓名、身份、核心性格、关系、说话方式和已确认的成年人年龄。`
             : '';
@@ -2120,18 +2342,27 @@ async function generateNpcs(feedback = '', mode = 'new') {
             ? '关系数量为 NP：生成所有承担主要关系线、冲突线或 NSFW 节点的主要 NPC，至少 2 人；不要只返回一个代表角色。'
             : '关系数量为 1V1：生成 1 名主要恋爱 NPC；只有在大纲明确需要且对主线有作用时，才额外生成少量功能 NPC。';
         const npcSchema = { type: 'object', properties: { npcs: { type: 'array', minItems: state.config.relationshipMode === 'NP' && mode === 'new' ? 2 : 1, items: { type: 'object', properties: { name: { type: 'string' }, aliases: { type: 'array', items: { type: 'string' } }, gender: { type: 'string' }, age: { type: 'string' }, height: { type: 'string' }, appearance: { type: 'string' }, personality: { type: 'string' }, identity: { type: 'string' }, past: { type: 'string' }, relationship: { type: 'string' }, attitude: { type: 'string' }, quotes: { type: 'array', items: { type: 'string' } }, nsfw: { type: 'string' }, body: { type: 'string' } }, required: ['name', 'aliases', 'gender', 'age', 'height', 'appearance', 'personality', 'identity', 'past', 'relationship', 'attitude', 'quotes', 'nsfw', 'body'] } } }, required: ['npcs'] };
-        const prompt = `${basePrompt()}\n已接受的大纲：${state.outline}\n请生成该大纲所需的全部主要 NPC。${npcCountRule}每人必须是明确的成年人，必须返回至少 1 人且每个字段完整。严格按以下顺序输出每一名 NPC，第一行必须是 name（姓名）：name、aliases（称呼/关键词）、gender、age、height、appearance、personality、identity、past、relationship、attitude、quotes、nsfw、body。没有完成一个 NPC 的全部字段前，不得开始下一个 NPC。先简洁、完整地写完所有 NPC，再补充细节；不得用省略号或“内容已截断”代替字段。每名 NPC 都必须单独使用完整的 <npc>...</npc>，最后闭合 </npcs>。不得输出分析、解释、前言或 Markdown。外貌要有至少两条可识别细节，不能都是模板化帅哥美女；性格必须能从身份和过去经历合理推出，不能自相矛盾。NSFW 字段只写成年角色的偏好、体位和语言风格，不改变人物性格。关键词必须覆盖姓名、昵称、去姓名、user 对其特殊称呼。${previous}${revision}\n如果无法返回 JSON，请使用 <npcs><npc>字段：内容</npc></npcs>，不要解释。`;
-        const result = await generateStructured(prompt, npcSchema, state.config.relationshipMode === 'NP' ? 16000 : 10000, { allowText: true, patchTag: mode === 'revise' ? 'npc_patch' : '' });
-        let nextNpcs = mode === 'revise'
-            ? mergeNpcDrafts(
-                state.npcs,
-                (() => {
-                    const restricted = restrictNpcRevision(result.npcs, feedback, state.npcs);
-                    return restricted.length ? restricted : diffNpcFields(state.npcs, result.npcs, feedback);
-                })(),
-                feedback,
-            )
-            : Array.isArray(result.npcs) ? normalizeNpcCollection(result.npcs) : [];
+        const prompt = `${basePrompt()}\n已接受的大纲：${state.outline}\n请生成该大纲所需的全部主要 NPC。${npcCountRule}必须返回至少 1 人且每个字段完整；如果大纲包含成人内容，相关 NPC 的年龄字段必须明确为成年人。严格按以下顺序输出每一名 NPC，第一行必须是 name（姓名）：name、aliases（称呼/关键词）、gender、age、height、appearance、personality、identity、past、relationship、attitude、quotes、nsfw、body。没有完成一个 NPC 的全部字段前，不得开始下一个 NPC。先简洁、完整地写完所有 NPC，再补充细节；不得用省略号或“内容已截断”代替字段。每名 NPC 都必须单独使用完整的 <npc>...</npc>，最后闭合 </npcs>。不得输出分析、解释、前言或 Markdown。外貌要有至少两条可识别细节，不能都是模板化帅哥美女；性格必须能从身份和过去经历合理推出，不能自相矛盾。NSFW 字段只写成年角色的偏好、体位和语言风格，不改变人物性格。关键词必须覆盖姓名、昵称、去姓名、user 对其特殊称呼。${previous}${novelty}${revision}\n如果无法返回 JSON，请使用 <npcs><npc>字段：内容</npc></npcs>，不要解释。`;
+        let nextNpcs = [];
+        for (let attempt = 0; attempt < (mode === 'new' ? 3 : 1); attempt++) {
+            const attemptPrompt = attempt ? `${prompt}\n上一次结果与历史姓名冲突。请彻底改写全部姓名和人物方案，重新输出一套不重复的完整 NPC；本次重试标识：${generationNonce('npc-retry', attempt)}。` : prompt;
+            const result = await generateStructured(attemptPrompt, npcSchema, state.config.relationshipMode === 'NP' ? 16000 : 10000, { allowText: true, patchTag: mode === 'revise' ? 'npc_patch' : '' });
+            nextNpcs = mode === 'revise'
+                ? mergeNpcDrafts(
+                    state.npcs,
+                    (() => {
+                        const restricted = restrictNpcRevision(result.npcs, feedback, state.npcs);
+                        return restricted.length ? restricted : diffNpcFields(state.npcs, result.npcs, feedback);
+                    })(),
+                    feedback,
+                )
+                : Array.isArray(result.npcs) ? normalizeNpcCollection(result.npcs) : [];
+            if (!nextNpcs.length) continue;
+            const candidateNames = nextNpcs.map(npc => canonicalText(npc.name)).filter(Boolean);
+            const duplicateName = mode === 'new' && (new Set(candidateNames).size !== candidateNames.length || candidateNames.some(name => previousNames.some(old => canonicalText(old) === name)));
+            if (!duplicateName) break;
+            nextNpcs = [];
+        }
         if (!nextNpcs.length) throw new Error('AI 没有返回主要 NPC，请重试；当前 NPC 草稿已保留。');
 
         // NP models occasionally stop after one character despite the count
@@ -2143,7 +2374,7 @@ async function generateNpcs(feedback = '', mode = 'new') {
             saveState();
             const existingNames = nextNpcs.map(npc => npc.name).filter(Boolean);
             try {
-                const supplementPrompt = `${basePrompt()}\n已接受的大纲：${state.outline}\n当前已经生成的主要 NPC：${JSON.stringify(nextNpcs)}\nNP 模式至少需要 2 名主要 NPC，现在只有 ${nextNpcs.length} 名。请只补充至少 ${2 - nextNpcs.length} 名新的成年主要 NPC，承担大纲中尚未覆盖的关系线、冲突线或 NSFW 节点。不得重写或重复以下角色：${existingNames.join('、') || '已有角色'}。先完整写完所有新增 NPC，再补充细节；不得省略字段，不得用省略号。只输出 <npcs><npc>完整字段</npc></npcs>。`;
+                const supplementPrompt = `${basePrompt()}\n已接受的大纲：${state.outline}\n当前已经生成的主要 NPC：${JSON.stringify(nextNpcs)}\nNP 模式至少需要 2 名主要 NPC，现在只有 ${nextNpcs.length} 名。请只补充至少 ${2 - nextNpcs.length} 名新的 NPC，承担大纲中尚未覆盖的关系线、冲突线或 NSFW 节点；若涉及成人内容，新 NPC 的年龄字段必须明确为成年人。不得重写或重复以下角色：${existingNames.join('、') || '已有角色'}。先完整写完所有新增 NPC，再补充细节；不得省略字段，不得用省略号。只输出 <npcs><npc>完整字段</npc></npcs>。`;
                 const supplement = await generateStructured(supplementPrompt, { ...npcSchema, properties: { ...npcSchema.properties, npcs: { ...npcSchema.properties.npcs, minItems: 1 } } }, 10000, { allowText: true });
                 const knownNames = new Set(nextNpcs.flatMap(npc => [npc.name, ...npc.aliases]).filter(Boolean));
                 const additions = (supplement.npcs || []).map(normalizeNpc).filter(npc => npc.name && !knownNames.has(npc.name));
@@ -2155,6 +2386,7 @@ async function generateNpcs(feedback = '', mode = 'new') {
 
         nextNpcs = normalizeNpcCollection(nextNpcs);
         state.npcs = nextNpcs;
+        if (mode === 'new') state.npcNameHistory = unique([...state.npcNameHistory, ...nextNpcs.flatMap(npc => [npc.name, ...npc.aliases])]).slice(-80);
         state.npcsAccepted = false;
         saveState();
         activeStage = 'npc';
@@ -2175,7 +2407,7 @@ function npcToWorldEntry(npc) {
     const normalized = normalizeNpc(npc);
     const name = normalized.name || '未命名 NPC';
     const keys = unique([name, ...normalized.aliases, name.split(/\s+/).at(-1)]);
-    const content = `[剧情大纲工作台 NPC]\n姓名：${name}\n关键词：${keys.join('、')}\n性别：${normalized.gender}\n年龄：${normalized.age}（必须为成年人）\n身高：${normalized.height}\n外貌：${normalized.appearance}\n性格：${normalized.personality}\n身份背景：${normalized.identity}\n过去经历：${normalized.past}\n与 user 的关系：${normalized.relationship}\n对 user 的态度：${normalized.attitude}\n典型语录：${normalized.quotes.join('；')}\nNSFW偏好与语言风格：${normalized.nsfw}\n成年身体信息：${normalized.body}`;
+    const content = `[剧情大纲工作台 NPC]\n姓名：${name}\n关键词：${keys.join('、')}\n性别：${normalized.gender}\n年龄：${normalized.age}\n身高：${normalized.height}\n外貌：${normalized.appearance}\n性格：${normalized.personality}\n身份背景：${normalized.identity}\n过去经历：${normalized.past}\n与 user 的关系：${normalized.relationship}\n对 user 的态度：${normalized.attitude}\n典型语录：${normalized.quotes.join('；')}\nNSFW偏好与语言风格：${normalized.nsfw}\n身体信息：${normalized.body}`;
     return { keys, content, comment: `SOS NPC - ${name}` };
 }
 

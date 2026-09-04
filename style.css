@@ -59,8 +59,13 @@
 .sos-segment { display: flex; flex-wrap: wrap; gap: 5px; }
 #sos-overlay textarea, #sos-overlay input { box-sizing: border-box; width: 100%; border: 1px solid var(--sos-line); background: #10141a; color: var(--sos-ink); padding: 10px 11px; font: inherit; border-radius: 2px; }
 #sos-overlay textarea:focus, #sos-overlay input:focus { outline: 1px solid var(--sos-accent); border-color: var(--sos-accent); }
+#sos-overlay select { box-sizing: border-box; width: 100%; min-height: 40px; border: 1px solid var(--sos-line); background: #10141a; color: var(--sos-ink); padding: 9px 11px; font: inherit; border-radius: 2px; }
+#sos-overlay select:focus { outline: 1px solid var(--sos-accent); border-color: var(--sos-accent); }
 .sos-field textarea { min-height: 66px; margin-top: 7px; resize: vertical; }
 .sos-subsection { margin-top: 25px; padding-top: 20px; border-top: 1px solid var(--sos-line); }
+.sos-worldbook-source { display: grid; gap: 8px; max-width: 640px; margin-bottom: 14px; }
+.sos-worldbook-source label { color: #c8d0db; font-size: 13px; font-weight: 700; }
+.sos-worldbook-source small { margin-top: 0; }
 .sos-import-list { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-height: 28px; margin-bottom: 13px; color: var(--sos-muted); }
 .sos-import-list span { padding: 6px 9px; background: var(--sos-panel-2); color: var(--sos-ink); font-size: 12px; }
 .sos-import-list em { font-size: 12px; }
