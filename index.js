@@ -1,7 +1,7 @@
 const EXTENSION_ID = 'story-outline-studio';
 const METADATA_KEY = 'storyOutlineStudio';
 const PROMPT_KEY = 'story-outline-studio-continuity';
-const VERSION = 11;
+const VERSION = 12;
 
 // Load core modules after the extension script itself has been evaluated. This
 // avoids the script.js <-> st-context.js cycle preventing the public API from
@@ -109,6 +109,11 @@ const text = value => {
     if (typeof value === 'object') {
         const nested = value.text ?? value.content ?? value.value ?? value.name ?? value.label;
         if (nested !== undefined) return text(nested);
+        try {
+            return JSON.stringify(value);
+        } catch {
+            return '';
+        }
     }
     return String(value).trim();
 };
@@ -140,6 +145,52 @@ function normalizeNpc(value) {
     const givenName = nameParts.length > 1 ? nameParts.at(-1) : npc.name.length > 1 ? npc.name.slice(1) : npc.name;
     if (givenName && !npc.aliases.includes(givenName)) npc.aliases.push(givenName);
     return npc;
+}
+
+function npcMergeKey(npc) {
+    const normalize = value => text(value).toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+    if (normalize(npc.name)) return `name:${normalize(npc.name)}`;
+    const identity = ['gender', 'age', 'height', 'appearance', 'personality', 'identity', 'past', 'relationship', 'attitude', 'body']
+        .map(field => normalize(npc[field])).join('|');
+    return identity ? `draft:${identity}` : '';
+}
+
+function mergeNpcRecord(previous, next) {
+    const merged = { ...normalizeNpc(previous) };
+    const candidate = normalizeNpc(next);
+    for (const field of NPC_TEXT_FIELDS) if (candidate[field]) merged[field] = candidate[field];
+    merged.aliases = unique([...merged.aliases, ...candidate.aliases]);
+    merged.quotes = unique([...merged.quotes, ...candidate.quotes]);
+    return normalizeNpc(merged);
+}
+
+function normalizeNpcCollection(values) {
+    const result = [];
+    const indexes = new Map();
+    let namelessIndex = -1;
+    for (const value of Array.isArray(values) ? values : []) {
+        const npc = normalizeNpc(value);
+        if (!Object.values(npc).some(item => Array.isArray(item) ? item.length : Boolean(item))) continue;
+        // A response that omitted `name` is one incomplete draft, not a new
+        // NPC for every field fragment or retry. Keep it as one editable card.
+        // A confirmed name is required before this draft can be written to a
+        // world book, so merging nameless records is preferable to inventing
+        // several indistinguishable NPCs.
+        if (!npc.name && namelessIndex >= 0) {
+            result[namelessIndex] = mergeNpcRecord(result[namelessIndex], npc);
+            continue;
+        }
+        const key = npcMergeKey(npc);
+        const previousIndex = key ? indexes.get(key) : undefined;
+        if (previousIndex === undefined) {
+            if (key) indexes.set(key, result.length);
+            if (!npc.name) namelessIndex = result.length;
+            result.push(npc);
+        } else {
+            result[previousIndex] = mergeNpcRecord(result[previousIndex], npc);
+        }
+    }
+    return result;
 }
 
 function ageNumber(value) {
@@ -237,7 +288,10 @@ function getState() {
             at: Number(next.lastGeneration.at) || 0,
         }
         : defaultState().lastGeneration;
-    next.npcs = Array.isArray(next.npcs) ? next.npcs.map(normalizeNpc) : [];
+    // Older versions could append the same partial response several times.
+    // Collapse those drafts when loading metadata so one failed request cannot
+    // produce a page full of identical "unnamed" validation warnings.
+    next.npcs = normalizeNpcCollection(next.npcs);
     next.importedCharacterReferences = Array.isArray(next.importedCharacterReferences)
         ? next.importedCharacterReferences.map(reference => ({
             name: text(reference?.name) || '未命名参考角色',
@@ -718,13 +772,13 @@ function parsePlainNpcBlocks(value) {
         .map(block => block.trim())
         .filter(Boolean);
     const candidates = blocks.length > 1 ? blocks : [source];
-    return candidates.map(block => {
+    return normalizeNpcCollection(candidates.map(block => {
         const cleaned = block
             .replace(/^(?:#{1,6}\s*)?(?:主要\s*)?(?:NPC|角色|人物)\s*(?:[#：:]?\s*\d+|[一二三四五六七八九十]+)?\s*[：:]?\s*/i, '')
             .replace(/^[-=]{3,}\s*$/gm, '')
             .trim();
         return parseKeyValueBlock(cleaned);
-    }).filter(fields => fields.name || fields.appearance || fields['外貌'] || fields.identity || fields['身份背景']);
+    }).filter(fields => Object.keys(fields).some(key => ['name', 'gender', 'age', 'height', 'appearance', 'personality', 'identity', 'past', 'relationship', 'attitude', 'nsfw', 'body'].includes(key))));
 }
 
 function stripReasoningBlocks(value) {
@@ -753,9 +807,9 @@ function taggedNpcs(raw) {
     const blocks = candidates.flatMap(container => [...container.matchAll(/<npc\b[^>]*>([\s\S]*?)(?=<\/npc>|<npc\b|<\/npcs>|$)/gi)]
         .map(match => match[1].trim())
         .filter(Boolean));
-    return blocks
+    return normalizeNpcCollection(blocks
         .map(block => extractJson(block) || parseKeyValueBlock(block))
-        .filter(fields => fields && (fields.name || fields.姓名 || fields.appearance || fields.外貌 || fields.identity || fields.身份背景));
+        .filter(fields => fields && (fields.name || fields.姓名 || fields.appearance || fields.外貌 || fields.identity || fields.身份背景)));
 }
 
 function taggedPatches(raw, tag) {
@@ -1367,12 +1421,12 @@ function normalizeGeneratedResult(parsed, schema) {
             const patch = parsed.npc_patch && typeof parsed.npc_patch === 'object' ? parsed.npc_patch : parseKeyValueBlock(parsed.npc_patch);
             return { ...parsed, npcs: patch ? [patch] : [] };
         }
-        if (Array.isArray(parsed)) return { npcs: parsed.map(normalizeNpc) };
-        if (Array.isArray(parsed.npcs)) return { ...parsed, npcs: parsed.npcs.map(normalizeNpc) };
+        if (Array.isArray(parsed)) return { npcs: normalizeNpcCollection(parsed) };
+        if (Array.isArray(parsed.npcs)) return { ...parsed, npcs: normalizeNpcCollection(parsed.npcs) };
         if (typeof parsed.npcs === 'string') {
             const listed = parsePlainNpcBlocks(parsed.npcs);
             const fields = parseKeyValueBlock(parsed.npcs);
-            if (listed.length) return { ...parsed, npcs: listed.map(normalizeNpc) };
+            if (listed.length) return { ...parsed, npcs: normalizeNpcCollection(listed) };
             if (fields.name || fields.appearance || fields['外貌']) return { ...parsed, npcs: [normalizeNpc(fields)] };
         }
         if (parsed.npcs && typeof parsed.npcs === 'object' && !Array.isArray(parsed.npcs)) {
@@ -1382,16 +1436,16 @@ function normalizeGeneratedResult(parsed, schema) {
             if (listed.length) return { ...parsed, npcs: listed.map(normalizeNpc) };
         }
         for (const key of ['characters', 'characterList', 'character_list', 'items', 'results', 'npcList', 'npc_list', 'mainNpcs', 'main_npcs', '主要NPC', '主要 NPC', '主要角色', '角色列表', '人物列表']) {
-            if (Array.isArray(parsed[key])) return { ...parsed, npcs: parsed[key].map(normalizeNpc) };
+            if (Array.isArray(parsed[key])) return { ...parsed, npcs: normalizeNpcCollection(parsed[key]) };
             if (parsed[key] && typeof parsed[key] === 'object') {
                 const listed = Object.entries(parsed[key])
                     .map(([name, value]) => value && typeof value === 'object' ? ({ name, ...value }) : ({ name, description: value }))
                     .filter(item => item.name || item.appearance || item['外貌']);
-                if (listed.length) return { ...parsed, npcs: listed.map(normalizeNpc) };
+                if (listed.length) return { ...parsed, npcs: normalizeNpcCollection(listed) };
             }
         }
         for (const key of ['npc', 'character']) {
-            if (Array.isArray(parsed[key])) return { ...parsed, npcs: parsed[key].map(normalizeNpc) };
+            if (Array.isArray(parsed[key])) return { ...parsed, npcs: normalizeNpcCollection(parsed[key]) };
             if (parsed[key] && typeof parsed[key] === 'object') return { ...parsed, npcs: [normalizeNpc(parsed[key])] };
         }
         if (parsed.characters && typeof parsed.characters === 'object') return { ...parsed, npcs: [normalizeNpc(parsed.characters)] };
@@ -1532,9 +1586,51 @@ function parseGeneratedPayload(raw, allowText = false, schema = null) {
 }
 
 function generatedErrorMessage(error) {
-    const message = text(error?.message || error?.error?.message || error?.detail?.message || error?.response || error);
+    const seen = new Set();
+    const read = (value, depth = 0) => {
+        if (value === null || value === undefined || depth > 5) return '';
+        if (typeof value === 'string') return value.trim();
+        if (typeof value !== 'object') return String(value).trim();
+        if (seen.has(value)) return '';
+        seen.add(value);
+        if (Array.isArray(value)) return value.map(item => read(item, depth + 1)).filter(Boolean).join('; ');
+        const preferred = ['message', 'error', 'detail', 'statusText', 'status', 'code', 'title', 'reason', 'data', 'response'];
+        for (const key of preferred) {
+            if (value[key] === undefined || value[key] === null) continue;
+            const nested = read(value[key], depth + 1);
+            if (nested) return key === 'status' || key === 'code' ? `${key}: ${nested}` : nested;
+        }
+        try {
+            return JSON.stringify(value);
+        } catch {
+            return '';
+        }
+    };
+    let message = read(error);
+    // Some SillyTavern adapters create Error('[object Object]') and keep the
+    // useful gateway payload in cause/response/data. Never expose the JS
+    // object-coercion placeholder to the user.
+    if (/^\[object object\]$/i.test(message)) {
+        const candidates = [error?.cause, error?.response, error?.data, error?.error, error?.detail];
+        message = candidates.map(candidate => read(candidate)).find(Boolean) || '';
+    }
     if (/unexpected token\s*'?/i.test(message)) return '酒馆上游返回了无法解析的内容，通常是 API 代理返回的 HTML 错误页。请检查代理地址和 API 状态。';
-    return message;
+    return message || '上游返回了未包含错误详情的失败响应。';
+}
+
+function responseErrorMessage(value) {
+    if (!value || typeof value !== 'object') return '';
+    const status = Number(value.status ?? value.statusCode ?? value.response?.status ?? value.data?.status ?? value.body?.status ?? value.payload?.status);
+    const error = value.error ?? value.data?.error ?? value.response?.error ?? value.body?.error ?? value.payload?.error;
+    if (error) return generatedErrorMessage(error);
+    if (status >= 400) return generatedErrorMessage(value);
+    return '';
+}
+
+function isUpstreamErrorText(value) {
+    const message = text(value);
+    return /^(?:service unavailable|temporarily unavailable|upstream unavailable)$/i.test(message.trim())
+        || /^(?:error\s*:\s*)?(?:502|503|504)\b/i.test(message.trim());
 }
 
 function wrapGenerationError(error) {
@@ -1542,6 +1638,7 @@ function wrapGenerationError(error) {
     if (/client network socket disconnected before secure tls connection was established|secure tls connection was established|tls handshake|socket disconnected|econnreset|enotfound|etimedout|network error|failed to fetch|request to .* failed/i.test(message)) {
         return new Error(`连接上游 API 失败：${message}。这是当前本地酒馆运行环境与中转站之间的网络/TLS 连接问题，不是大纲格式错误。请检查本机酒馆进程能否访问该域名、API 地址和 /v1 路径是否正确、中转站状态、是否需要让 Node.js 使用代理，以及是否可以更换节点。`);
     }
+    if (/\b(?:503|504)\b|service unavailable|temporarily unavailable|upstream unavailable/i.test(message)) return new Error(`上游 API 当前不可用（${message}）。这通常是中转站暂时离线、节点过载、网关维护或上游超时，不是 NPC/大纲解析错误。请稍后重试、检查接口状态，或更换 API 节点。`);
     if (/\b502\b|bad gateway/i.test(message)) return new Error('酒馆上游 API 返回 502（Bad Gateway），没有生成结果。请检查 API 代理或接口地址；如果输入上下文很大，请先减少角色卡或导入世界书内容后重试。');
     if (/\b(?:400|401|403|404|408|409|413|429|500|503|504)\b|response status/i.test(message)) return new Error(`酒馆上游 API 请求失败：${message}。请检查 API 设置、额度和代理状态。`);
     return error instanceof Error ? error : new Error(message || '生成失败');
@@ -1596,7 +1693,18 @@ async function generateJson(prompt, schema, responseLength = 1200, { allowText =
         saveGenerationSnapshot(kind, { error: wrapped.message });
         throw wrapped;
     }
+    const embeddedError = responseErrorMessage(result);
+    if (embeddedError) {
+        const wrapped = wrapGenerationError(new Error(embeddedError));
+        saveGenerationSnapshot(kind, { error: wrapped.message });
+        throw wrapped;
+    }
     let raw = extractAssistantContent(result).trim() || extractGeneratedText(result).trim();
+    if (isUpstreamErrorText(raw)) {
+        const wrapped = wrapGenerationError(new Error(raw));
+        saveGenerationSnapshot(kind, { raw, error: wrapped.message });
+        throw wrapped;
+    }
     let parsed = parseGeneratedPayload(raw, allowText, schema);
     if (parsed && hasGeneratedShape(parsed, schema)) {
         saveGenerationSnapshot(kind, { raw });
@@ -1610,7 +1718,10 @@ async function generateJson(prompt, schema, responseLength = 1200, { allowText =
     if (!raw) {
         try {
             const retryResult = await request('\n上一次请求没有返回正文。请重新生成一次，只输出完整结果，不要解释。');
+            const retryEmbeddedError = responseErrorMessage(retryResult);
+            if (retryEmbeddedError) throw wrapGenerationError(new Error(retryEmbeddedError));
             raw = extractAssistantContent(retryResult).trim() || extractGeneratedText(retryResult).trim();
+            if (isUpstreamErrorText(raw)) throw wrapGenerationError(new Error(raw));
             parsed = parseGeneratedPayload(raw, allowText, schema);
             if (parsed && hasGeneratedShape(parsed, schema)) {
                 saveGenerationSnapshot(kind, { raw });
@@ -1630,7 +1741,10 @@ async function generateJson(prompt, schema, responseLength = 1200, { allowText =
     if (raw) {
         try {
             const repaired = await request(`\n上一次返回未被识别。请只把下面的内容整理成指定标签协议并重新输出，不要解释：\n${limitPromptText(raw, 12000)}`);
+            const repairedEmbeddedError = responseErrorMessage(repaired);
+            if (repairedEmbeddedError) throw wrapGenerationError(new Error(repairedEmbeddedError));
             const repairedRaw = extractAssistantContent(repaired).trim() || extractGeneratedText(repaired).trim();
+            if (isUpstreamErrorText(repairedRaw)) throw wrapGenerationError(new Error(repairedRaw));
             const repairedParsed = parseGeneratedPayload(repairedRaw, allowText, schema);
             if (repairedParsed && hasGeneratedShape(repairedParsed, schema)) {
                 saveGenerationSnapshot(kind, { raw, repaired: repairedRaw });
@@ -1848,7 +1962,7 @@ async function generateNpcs(feedback = '', mode = 'new') {
             ? '关系数量为 NP：生成所有承担主要关系线、冲突线或 NSFW 节点的主要 NPC，至少 2 人；不要只返回一个代表角色。'
             : '关系数量为 1V1：生成 1 名主要恋爱 NPC；只有在大纲明确需要且对主线有作用时，才额外生成少量功能 NPC。';
         const npcSchema = { type: 'object', properties: { npcs: { type: 'array', minItems: state.config.relationshipMode === 'NP' && mode === 'new' ? 2 : 1, items: { type: 'object', properties: { name: { type: 'string' }, aliases: { type: 'array', items: { type: 'string' } }, gender: { type: 'string' }, age: { type: 'string' }, height: { type: 'string' }, appearance: { type: 'string' }, personality: { type: 'string' }, identity: { type: 'string' }, past: { type: 'string' }, relationship: { type: 'string' }, attitude: { type: 'string' }, quotes: { type: 'array', items: { type: 'string' } }, nsfw: { type: 'string' }, body: { type: 'string' } }, required: ['name', 'aliases', 'gender', 'age', 'height', 'appearance', 'personality', 'identity', 'past', 'relationship', 'attitude', 'quotes', 'nsfw', 'body'] } } }, required: ['npcs'] };
-        const prompt = `${basePrompt()}\n已接受的大纲：${state.outline}\n请生成该大纲所需的全部主要 NPC。${npcCountRule}每人必须是明确的成年人，必须返回至少 1 人且每个字段完整。先简洁、完整地写完所有 NPC，再补充细节；不得用省略号或“内容已截断”代替字段。每名 NPC 都必须单独使用完整的 <npc>...</npc>，最后闭合 </npcs>。外貌要有至少两条可识别细节，不能都是模板化帅哥美女；性格必须能从身份和过去经历合理推出，不能自相矛盾。NSFW 字段只写成年角色的偏好、体位和语言风格，不改变人物性格。关键词必须覆盖姓名、昵称、去姓名、user 对其特殊称呼。${previous}${revision}\n如果无法返回 JSON，请使用 <npcs><npc>字段：内容</npc></npcs>，不要解释。`;
+        const prompt = `${basePrompt()}\n已接受的大纲：${state.outline}\n请生成该大纲所需的全部主要 NPC。${npcCountRule}每人必须是明确的成年人，必须返回至少 1 人且每个字段完整。严格按以下顺序输出每一名 NPC，第一行必须是 name（姓名）：name、aliases（称呼/关键词）、gender、age、height、appearance、personality、identity、past、relationship、attitude、quotes、nsfw、body。没有完成一个 NPC 的全部字段前，不得开始下一个 NPC。先简洁、完整地写完所有 NPC，再补充细节；不得用省略号或“内容已截断”代替字段。每名 NPC 都必须单独使用完整的 <npc>...</npc>，最后闭合 </npcs>。不得输出分析、解释、前言或 Markdown。外貌要有至少两条可识别细节，不能都是模板化帅哥美女；性格必须能从身份和过去经历合理推出，不能自相矛盾。NSFW 字段只写成年角色的偏好、体位和语言风格，不改变人物性格。关键词必须覆盖姓名、昵称、去姓名、user 对其特殊称呼。${previous}${revision}\n如果无法返回 JSON，请使用 <npcs><npc>字段：内容</npc></npcs>，不要解释。`;
         const result = await generateJson(prompt, npcSchema, state.config.relationshipMode === 'NP' ? 16000 : 10000, { allowText: true, patchTag: mode === 'revise' ? 'npc_patch' : '' });
         let nextNpcs = mode === 'revise'
             ? mergeNpcDrafts(
@@ -1859,7 +1973,7 @@ async function generateNpcs(feedback = '', mode = 'new') {
                 })(),
                 feedback,
             )
-            : Array.isArray(result.npcs) ? result.npcs.map(normalizeNpc) : [];
+            : Array.isArray(result.npcs) ? normalizeNpcCollection(result.npcs) : [];
         if (!nextNpcs.length) throw new Error('AI 没有返回主要 NPC，请重试；当前 NPC 草稿已保留。');
 
         // NP models occasionally stop after one character despite the count
@@ -1881,6 +1995,7 @@ async function generateNpcs(feedback = '', mode = 'new') {
             }
         }
 
+        nextNpcs = normalizeNpcCollection(nextNpcs);
         state.npcs = nextNpcs;
         state.npcsAccepted = false;
         saveState();
