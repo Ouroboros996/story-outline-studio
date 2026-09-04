@@ -1,7 +1,7 @@
 const EXTENSION_ID = 'story-outline-studio';
 const METADATA_KEY = 'storyOutlineStudio';
 const PROMPT_KEY = 'story-outline-studio-continuity';
-const VERSION = 12;
+const VERSION = 13;
 
 // Load core modules after the extension script itself has been evaluated. This
 // avoids the script.js <-> st-context.js cycle preventing the public API from
@@ -2136,7 +2136,7 @@ function storyPrompt() {
     const pacingRule = remaining > 0
         ? `距离最低交互要求还差 ${remaining} 个 user 楼层。在达到 ${min} 个 user 楼层前，严禁进入最终高潮、解决核心矛盾、完成终极目标、让主要关系定局或输出结局；本次只能推进过程事件并留下明确的后续行动空间。`
         : '已达到最低交互楼层，可以依据大纲和当前节奏进入高潮或结局，但不要无故跳过必要情节。';
-    return `${basePrompt()}\n已接受大纲（版本${state.outlineVersion}）：${state.outline}\n已确认 NPC：${JSON.stringify(state.npcs)}\n已完成剧情快照（绝不能重写）：${state.completedStorySnapshot || '暂无'}\n当前剧情楼层：${state.currentTurn}；user已输入楼层：${state.userTurnCount}；本篇最低 user 交互楼层：${min}\n楼层硬约束：${pacingRule}\n硬规则：严格按照接受的大纲和所有配置关键词推进；不要擅自改变 user 人设；不要让 NPC OOC；不要提前结局；已完成剧情只当作历史；新的剧情必须连接最近聊天内容。如果 user 本楼只输入“继续剧情”或等价推进指令，不要把这几个字当作剧情事实，直接按照接受版大纲、最近聊天和当前节奏推进下一楼。只输出本次剧情正文，不要大纲、总结、设定说明。`;
+    return `${basePrompt()}\n已接受大纲（版本${state.outlineVersion}）：${state.outline}\n已确认 NPC：${JSON.stringify(state.npcs)}\n已完成剧情快照（绝不能重写）：${state.completedStorySnapshot || '暂无'}\n当前剧情楼层：${state.currentTurn}；user已输入楼层：${state.userTurnCount}；本篇最低 user 交互楼层：${min}\n楼层硬约束：${pacingRule}\n硬规则：严格按照接受的大纲和所有配置关键词推进；不要擅自改变 user 人设；不要让 NPC OOC；不要提前结局；已完成剧情只当作历史；新的剧情必须连接最近聊天内容。user 本楼明确做出的行动、选择、拒绝、目标和新要求优先于未发生的大纲情节；不要无视 user 输入，也不要强行把 user 拉回原轨。普通偏差要自然吸收，并把未完成的大纲事件改写成能由当前行动导向的版本。若 user 的行动与未完成大纲的关键事件、关系走向或结局方向发生实质冲突，先承接 user 已经做出的事实，不要在本楼强行纠正；将其作为新的分支，并提示 user 可用“修改后续大纲”确认后续路线。已完成剧情绝不能改写。如果 user 本楼只输入“继续剧情”或等价推进指令，不要把这几个字当作剧情事实，直接按照接受版大纲、最近聊天和当前节奏推进下一楼。只输出本次剧情正文，不要大纲、总结、设定说明。`;
 }
 
 function updateContinuityPrompt() {
@@ -2158,22 +2158,31 @@ function isContinuationDirective(value) {
 async function continueStory() {
     await withGenerating(async () => {
         if (!state.outlineAccepted || !state.npcsAccepted) return toastr.warning('请先接受大纲和 NPC。');
-        let result;
+        const beforeLength = ctx.chat.length;
         try {
-            result = await ctx.generateQuietPrompt({ quietPrompt: `${storyPrompt()}\n最近聊天：\n${latestChatText()}\n现在继续下一楼剧情。`, responseLength: state.config.length === 'long' ? 1800 : 1000, skipWIAN: false });
+            // Use the foreground generation pipeline so SillyTavern owns the
+            // streamed message, chat persistence, preset, and World Info.
+            // storyPrompt() is already installed through setExtensionPrompt;
+            // putting it in quiet_prompt too would duplicate the full outline.
+            await ctx.generate('normal', {
+                quiet_prompt: '现在继续下一楼剧情。若没有新的 user 行动，按照当前已接受大纲推进，不要重复设定说明。',
+                quietToLoud: true,
+                skipWIAN: false,
+                force_name2: true,
+            });
         } catch (error) {
             throw wrapGenerationError(error);
         }
-        const content = extractGeneratedText(result).trim();
-        if (!content) throw new Error('AI 没有返回剧情。');
-        const message = { name: ctx.name2 || currentCharacterContext().name, is_user: false, is_system: false, mes: content, send_date: Date.now(), extra: { storyOutlineStudio: { version: state.outlineVersion, turn: state.currentTurn + 1 } } };
-        ctx.chat.push(message);
-        ctx.addOneMessage(message);
+        const generated = ctx.chat.slice(beforeLength)
+            .filter(message => !message.is_user && text(message.mes))
+            .at(-1);
+        const content = text(generated?.mes);
+        if (!generated || !content) throw new Error('酒馆请求已完成，但没有写入剧情消息。请检查 API 响应和酒馆控制台。');
         state.currentTurn += 1;
         state.completedStoryMessages += 1;
         state.completedStorySnapshot = `${state.completedStorySnapshot}\n${content}`.trim().slice(-12000);
+        generated.extra = { ...(generated.extra || {}), storyOutlineStudio: { version: state.outlineVersion, turn: state.currentTurn } };
         saveState();
-        await ctx.saveChat?.();
         rerender();
     });
 }
