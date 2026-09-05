@@ -8,6 +8,7 @@ const VERSION = 16;
 // avoids the script.js <-> st-context.js cycle preventing the public API from
 // being registered during startup.
 let getContext;
+let worldInfoModule;
 let createWorldInfoEntry;
 let loadWorldInfo;
 let saveWorldInfo;
@@ -29,9 +30,10 @@ const dependencyPromise = new Promise(resolve => setTimeout(resolve, 0)).then(()
     import('../../../popup.js'),
     import('../../../slash-commands/SlashCommandParser.js'),
     import('../../../slash-commands/SlashCommand.js'),
-])).then(([contextModule, worldInfoModule, utilsModule, powerUserModule, popupModule, parserModule, commandModule]) => {
+])).then(([contextModule, importedWorldInfoModule, utilsModule, powerUserModule, popupModule, parserModule, commandModule]) => {
     getContext = contextModule.getContext;
-    ({ createWorldInfoEntry, loadWorldInfo, saveWorldInfo, updateWorldInfoList, getWorldInfoSettings } = worldInfoModule);
+    worldInfoModule = importedWorldInfoModule;
+    ({ createWorldInfoEntry, loadWorldInfo, saveWorldInfo, updateWorldInfoList, getWorldInfoSettings } = importedWorldInfoModule);
     ({ getCharaFilename } = utilsModule);
     ({ power_user } = powerUserModule);
     ({ POPUP_TYPE } = popupModule);
@@ -120,6 +122,69 @@ function refreshContext() {
 
 const clone = value => JSON.parse(JSON.stringify(value));
 const asArray = value => Array.isArray(value) ? value.filter(Boolean).map(String) : [];
+
+function worldBookEntryValue(entry, index = 0) {
+    if (!entry || typeof entry !== 'object') throw new Error(`世界书条目 ${index + 1} 格式无效。`);
+    const normalized = { ...entry };
+    const uid = normalized.uid ?? normalized.id ?? index;
+    normalized.uid = String(uid);
+    if (normalized.key === undefined && normalized.keys !== undefined) normalized.key = normalized.keys;
+    if (normalized.keysecondary === undefined && normalized.secondary_keys !== undefined) normalized.keysecondary = normalized.secondary_keys;
+    normalized.key = Array.isArray(normalized.key) ? normalized.key : asList(normalized.key);
+    normalized.keysecondary = Array.isArray(normalized.keysecondary) ? normalized.keysecondary : asList(normalized.keysecondary);
+    normalized.content = text(normalized.content ?? normalized.description);
+    return normalized;
+}
+
+function unwrapWorldBookData(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    if (value.entries !== undefined) return value;
+    if (value.character_book && typeof value.character_book === 'object') return value.character_book;
+    for (const key of ['data', 'result', 'response', 'originalData']) {
+        if (value[key] !== undefined) {
+            const nested = unwrapWorldBookData(value[key]);
+            if (nested !== value[key] || nested?.entries !== undefined || nested?.character_book) return nested;
+        }
+    }
+    return value;
+}
+
+function normalizeWorldBookEntries(value) {
+    const source = unwrapWorldBookData(value);
+    const rawEntries = source?.entries;
+    if (rawEntries === undefined) {
+        throw new Error('世界书格式无效：缺少 entries。');
+    }
+    if (Array.isArray(rawEntries)) {
+        return Object.fromEntries(rawEntries.map((entry, index) => {
+            const normalized = worldBookEntryValue(entry, index);
+            return [normalized.uid, normalized];
+        }));
+    }
+    if (!rawEntries || typeof rawEntries !== 'object') {
+        throw new Error('世界书格式无效：entries 必须是数组或对象。');
+    }
+    return Object.fromEntries(Object.entries(rawEntries).map(([key, entry], index) => {
+        const normalized = worldBookEntryValue(entry, index);
+        const entryId = entry.uid ?? entry.id ?? key;
+        normalized.uid = String(entryId);
+        return [String(entryId), normalized];
+    }));
+}
+
+function normalizeWorldBookData(value) {
+    const source = unwrapWorldBookData(value);
+    if (!source || typeof source !== 'object' || Array.isArray(source)) {
+        throw new Error('世界书格式无效：必须是对象。');
+    }
+    if (source.entries === undefined && Object.keys(source).length === 0) return { entries: {} };
+    return { ...source, entries: normalizeWorldBookEntries(source) };
+}
+
+function worldBookEntriesObject(data) {
+    return normalizeWorldBookData(data).entries;
+}
+
 const asList = value => {
     if (Array.isArray(value)) return value.filter(Boolean).map(item => typeof item === 'object' ? text(item.name ?? item.label ?? item.value ?? item.text ?? item.content ?? item.quote ?? item.alias ?? item.key ?? JSON.stringify(item)) : String(item));
     const source = text(value);
@@ -225,7 +290,7 @@ function containsAnyName(value, names) {
 function loadedStoryNpcNames() {
     const names = [];
     for (const data of loadedReferenceWorldBooks.values()) {
-        for (const entry of Object.values(data?.entries || {})) {
+        for (const entry of Object.values(worldBookEntriesObject(data))) {
             const content = text(entry?.content);
             if (!isStoryNpcEntry(entry)) continue;
             const name = content.match(/(?:^|\n)姓名：([^\n]+)/)?.[1]
@@ -266,6 +331,30 @@ function historicalOutlineNames() {
             ...explicitNamesFromText(item?.outline),
         ]),
     ]);
+}
+
+function replaceExactName(value, oldName, newName) {
+    const source = text(value);
+    if (!oldName || !newName || oldName === newName) return source;
+    return source.split(oldName).join(newName);
+}
+
+function renameNpcAcrossState(oldName, newName) {
+    if (!oldName || !newName || oldName === newName) return;
+    const renameValue = value => {
+        if (typeof value === 'string') return replaceExactName(value, oldName, newName);
+        if (Array.isArray(value)) return value.map(renameValue);
+        if (value && typeof value === 'object') {
+            return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, renameValue(item)]));
+        }
+        return value;
+    };
+    state.outlineData = renameValue(state.outlineData);
+    state.outline = replaceExactName(state.outline, oldName, newName);
+    state.outlineGenerationHistory = renameValue(state.outlineGenerationHistory);
+    state.outlineRevisions = renameValue(state.outlineRevisions);
+    state.npcs = renameValue(state.npcs);
+    state.npcNameHistory = state.npcNameHistory.map(name => replaceExactName(name, oldName, newName));
 }
 
 function npcNameCollision(nextNpcs, previousNames = []) {
@@ -430,7 +519,25 @@ function textSimilarity(first, second) {
 
 function hasDuplicateOutline(next, history) {
     const signature = outlineSignature(next);
-    return history.some(item => signature && outlineSignature(item) === signature || textSimilarity(next, item) >= 0.72);
+    return history.some(item => {
+        if (signature && outlineSignature(item) === signature) return true;
+        return hasSameOutlineCast(next, item) && textSimilarity(next, item) >= 0.72;
+    });
+}
+
+function outlineNpcNames(data) {
+    const userName = canonicalText(currentUserName());
+    return unique(asList(data?.characterNames)).filter(name => {
+        const normalized = canonicalText(name);
+        return normalized && normalized !== userName;
+    });
+}
+
+function hasSameOutlineCast(first, second) {
+    const firstNames = new Set(outlineNpcNames(first).map(canonicalText));
+    const secondNames = new Set(outlineNpcNames(second).map(canonicalText));
+    return firstNames.size === secondNames.size
+        && [...firstNames].every(name => secondNames.has(name));
 }
 
 function worldBookSortKey(name) {
@@ -1401,14 +1508,33 @@ function bindPanelEvents() {
             rerender();
         }
     });
-    panel.querySelectorAll('[data-npc-field]').forEach(input => input.addEventListener('input', () => {
-        const npc = state.npcs[Number(input.dataset.npcIndex)];
-        if (!npc) return;
-        const value = input.dataset.npcField === 'aliases' || input.dataset.npcField === 'quotes' ? input.value.split(/[\n,，、]/).map(item => item.trim()).filter(Boolean) : input.value;
-        npc[input.dataset.npcField] = value;
-        state.npcsAccepted = false;
-        saveState();
-    }));
+    panel.querySelectorAll('[data-npc-field]').forEach(input => {
+        const eventName = input.dataset.npcField === 'name' ? 'change' : 'input';
+        input.addEventListener(eventName, () => {
+            const index = Number(input.dataset.npcIndex);
+            const npc = state.npcs[index];
+            if (!npc) return;
+
+            if (input.dataset.npcField === 'name') {
+                const oldName = text(npc.name);
+                const newName = text(input.value);
+                if (!newName || oldName === newName) return;
+                renameNpcAcrossState(oldName, newName);
+                state.npcs[index].name = newName;
+                state.npcsAccepted = false;
+                saveState();
+                rerender();
+                return;
+            }
+
+            const value = input.dataset.npcField === 'aliases' || input.dataset.npcField === 'quotes'
+                ? input.value.split(/[\n,，、]/).map(item => item.trim()).filter(Boolean)
+                : input.value;
+            npc[input.dataset.npcField] = value;
+            state.npcsAccepted = false;
+            saveState();
+        });
+    });
     panel.querySelectorAll('[data-npc-enabled]').forEach(input => input.addEventListener('change', () => {
         const npc = state.npcs[Number(input.dataset.npcIndex)];
         if (!npc) return;
@@ -1484,7 +1610,11 @@ function configPayload() {
 
 function getAvailableWorldBookNames() {
     refreshContext();
-    const names = typeof ctx.getWorldInfoNames === 'function' ? ctx.getWorldInfoNames() : [];
+    // `getWorldInfoNames` is a newer context helper. SillyTavern 1.17
+    // already exposes the live `world_names` binding from world-info.js.
+    const names = typeof ctx.getWorldInfoNames === 'function'
+        ? ctx.getWorldInfoNames()
+        : Array.isArray(worldInfoModule?.world_names) ? worldInfoModule.world_names : [];
     return [...new Set(names.map(text).filter(Boolean))].sort(compareWorldBookNames);
 }
 
@@ -1511,6 +1641,14 @@ function getCharacterExtraWorldBookNames() {
         : text(character?.avatar).replace(/\.[^/.]+$/, '');
     const lore = Array.isArray(charLore) ? charLore.find(item => text(item?.name) === fileName) : null;
     return Array.isArray(lore?.extraBooks) ? lore.extraBooks.map(text).filter(Boolean) : [];
+}
+
+function getCurrentCharacterBook() {
+    refreshContext();
+    const character = hasCurrentCharacter() ? ctx.characters[ctx.characterId] : null;
+    const book = character?.data?.character_book;
+    if (!book) return null;
+    try { return normalizeWorldBookData(book); } catch { return null; }
 }
 
 function linkedReferenceWorldBookNames() {
@@ -1544,8 +1682,7 @@ async function ensureReferenceWorldBookLoaded() {
     }
     for (const name of names) {
         if (loadedReferenceWorldBooks.has(name)) continue;
-        const data = await loadWorldInfo(name);
-        if (!data || !data.entries || typeof data.entries !== 'object') throw new Error(`无法读取世界书“${name}”。`);
+        const data = normalizeWorldBookData(await loadWorldInfo(name));
         loadedReferenceWorldBooks.set(name, data);
     }
 }
@@ -1561,8 +1698,7 @@ async function selectReferenceWorldBook(name) {
         return;
     }
     if (!available.includes(requested)) throw new Error('找不到所选世界书，可能已被删除；请刷新后重新选择。');
-    const data = await loadWorldInfo(requested);
-    if (!data || !data.entries || typeof data.entries !== 'object') throw new Error(`无法读取世界书“${requested}”。`);
+    const data = normalizeWorldBookData(await loadWorldInfo(requested));
     state.referenceWorldBookName = requested;
     loadedReferenceWorldBooks.set(requested, data);
     saveState();
@@ -1623,6 +1759,23 @@ function referenceBooksText() {
             if (entries.length) books.push(`<linked_worldbook name="${escapeHtml(bookName)}">${entries.join('')}\n</linked_worldbook>`);
         }
         if (used >= maxTotal) break;
+    }
+    const characterBook = getCurrentCharacterBook();
+    if (characterBook && used < maxTotal) {
+        const entries = [];
+        for (const entry of Object.values(characterBook.entries)) {
+            if (entry?.disable === true || entry?.enabled === false || entry?.extensions?.disabled === true) continue;
+            if (isStoryNpcEntry(entry)) continue;
+            const remaining = maxTotal - used;
+            if (remaining <= 0) break;
+            const content = limitPromptText(entry?.content, Math.max(120, Math.min(1800, remaining - 80)));
+            if (!content) continue;
+            const keys = unique([...asList(entry?.key), ...asList(entry?.keysecondary)]);
+            const part = `\n[${keys.join('、') || '无关键词'}] ${content}`;
+            entries.push(part);
+            used += part.length;
+        }
+        if (entries.length) books.push(`<character_card_worldbook>${entries.join('')}\n</character_card_worldbook>`);
     }
     return books.join('\n');
 }
@@ -2476,17 +2629,12 @@ async function generateOutline(feedback = '', mode = 'new') {
             : '';
         const outlineHistory = [...state.outlineGenerationHistory, ...(state.outlineData && outlineSignature(state.outlineData) ? [state.outlineData] : [])];
         const currentName = currentUserName();
-        const historicalNames = unique([
-            ...outlineHistory.flatMap(item => asList(item.characterNames)),
-            ...historicalOutlineNames(),
-            ...currentStoryNpcNames(),
-        ]).filter(name => canonicalText(name) && canonicalText(name) !== canonicalText(currentName));
         const oldUserNames = historicalUserNames();
         const noveltyHistory = mode === 'new'
             ? outlineHistory.slice(-8).map(item => outlineSignature(item)).filter(Boolean).join('、')
             : '';
         const novelty = mode === 'new'
-            ? `\n这是全新剧情路线，不是对旧大纲换词。随机生成标识：${generationNonce('outline')}。必须更换核心冲突、关键场景、因果链、高潮解决方式和全部主要 NPC 姓名。严禁使用以下历史姓名或其同音、近似写法：${historicalNames.join('、') || '暂无'}。以下仅是历史版本的短指纹，禁止复原或沿用：${noveltyHistory || '暂无历史版本'}。不要输出旧故事中的谢寒寂、燎原或任何未出现在当前参考世界书启用条目中的 NPC。`
+            ? `\n这是全新剧情路线，不是对旧大纲换词。随机生成标识：${generationNonce('outline')}。必须更换核心冲突、关键场景、因果链、高潮解决方式和结局落点。当前 NPC 阵容及其改名后的最终姓名属于合法输入，必须按当前阵容写入大纲；只有在当前 NPC 阵容完全相同且整体高度相似时，才判定为重复。以下仅是历史版本的短指纹，禁止复原或沿用：${noveltyHistory || '暂无历史版本'}。`
             : '';
         const identityRule = currentName
             ? `\n当前聊天 user 的唯一姓名是“${currentName}”。大纲中的 user 必须指向这个姓名，不得使用旧 user 姓名${oldUserNames.length ? `（例如：${oldUserNames.join('、')}）` : ''}。请在 characterNames 中明确列出“${currentName}”。`
@@ -2522,7 +2670,6 @@ async function generateOutline(feedback = '', mode = 'new') {
             const minimumCharacterNames = state.config.relationshipMode === 'NP' ? 3 : 2;
             if (mode === 'new' && currentName && candidate.characterNames.length < minimumCharacterNames) continue;
             if (currentName && oldUserNames.length && containsAnyName(outlineText(candidate), oldUserNames)) continue;
-            if (mode === 'new' && historicalNames.length && containsAnyName(outlineText(candidate), historicalNames)) continue;
             if (currentName) candidate.characterNames = unique([currentName, ...candidate.characterNames]);
             if (mode === 'new' && hasDuplicateOutline(candidate, outlineHistory)) continue;
             outlineData = candidate;
@@ -2769,9 +2916,9 @@ function safeWorldBookName(value) {
 }
 
 function cloneWorldBookData(data) {
-    const copied = data && typeof data === 'object' ? clone(data) : {};
-    copied.entries = copied.entries && typeof copied.entries === 'object' ? copied.entries : {};
-    return copied;
+    if (!data || typeof data !== 'object') return { entries: {} };
+    if (!Object.keys(data).length) return { entries: {} };
+    return clone(normalizeWorldBookData(data));
 }
 
 function referenceCharacterWorldEntry(reference) {
@@ -2871,7 +3018,7 @@ function storyPrompt() {
     const pacingRule = remaining > 0
         ? `距离最低交互要求还差 ${remaining} 个 user 楼层。在达到 ${min} 个 user 楼层前，严禁进入最终高潮、解决核心矛盾、完成终极目标、让主要关系定局或输出结局；本次只能推进过程事件并留下明确的后续行动空间。`
         : '已达到最低交互楼层，可以依据大纲和当前节奏进入高潮或结局，但不要无故跳过必要情节。';
-    return `${basePrompt()}\n当前故事 ID：${ensureStoryId()}\n当前 user 唯一姓名：${currentUserName() || '尚未确定'}\n已接受大纲（版本${state.outlineVersion}）：${state.outline}\n当前故事启用的 NPC：${JSON.stringify(activeNpcs)}\n关闭的 NPC 不得出场、不得作为关系对象、不得被世界书上下文重新启用。\n已完成剧情快照（绝不能重写）：${state.completedStorySnapshot || '暂无'}\n当前剧情楼层：${state.currentTurn}；user已输入楼层：${state.userTurnCount}；本篇最低 user 交互楼层：${min}\n楼层硬约束：${pacingRule}\n硬规则：严格按照接受的大纲和所有配置关键词推进；不要擅自改变 user 人设；不要让 NPC OOC；不要提前结局；已完成剧情只当作历史；新的剧情必须连接最近聊天内容。user 本楼明确做出的行动、选择、拒绝、目标和新要求优先于未发生的大纲情节；不要无视 user 输入，也不要强行把 user 拉回原轨。普通偏差要自然吸收，并把未完成的大纲事件改写成能由当前行动导向的版本。若 user 的行动与未完成大纲的关键事件、关系走向或结局方向发生实质冲突，先承接 user 已经做出的事实，不要在本楼强行纠正；将其作为新的分支，并提示 user 可用“修改后续大纲”确认后续路线。已完成剧情绝不能改写。如果 user 本楼只输入“继续剧情”或等价推进指令，不要把这几个字当作剧情事实，直接按照接受版大纲、最近聊天和当前节奏推进下一楼。只输出本次剧情正文，不要大纲、总结、设定说明。`;
+    return `${basePrompt()}\n当前故事 ID：${ensureStoryId()}\n当前 user 唯一姓名：${currentUserName() || '尚未确定'}\n已接受大纲（版本${state.outlineVersion}）：${state.outline}\n当前故事启用的 NPC：${JSON.stringify(activeNpcs)}\n关闭的 NPC 不得出场、不得作为关系对象、不得被世界书上下文重新启用。\n已完成剧情快照（绝不能重写）：${state.completedStorySnapshot || '暂无'}\n当前剧情楼层：${state.currentTurn}；user已输入楼层：${state.userTurnCount}；本篇最低 user 交互楼层：${min}\n楼层硬约束：${pacingRule}\n配置中的特别想看的情节、禁区和补充要求：${text(state.config.detail) || '暂无'}\n特别要求是本次剧情的高优先级约束；其中明确指定的中途、高潮、结尾或场景，必须在未完成大纲范围内优先落实，已完成部分除外。\n硬规则：严格按照接受的大纲和所有配置关键词推进；不要擅自改变 user 人设；不要让 NPC OOC；不要提前结局；已完成剧情只当作历史；新的剧情必须连接最近聊天内容。user 本楼明确做出的行动、选择、拒绝、目标和新要求优先于未发生的大纲情节；不要无视 user 输入，也不要强行把 user 拉回原轨。普通偏差要自然吸收，并把未完成的大纲事件改写成能由当前行动导向的版本。若 user 的行动与未完成大纲的关键事件、关系走向或结局方向发生实质冲突，先承接 user 已经做出的事实，不要在本楼强行纠正；将其作为新的分支，并提示 user 可用“修改后续大纲”确认后续路线。已完成剧情绝不能改写。如果 user 本楼只输入“继续剧情”或等价推进指令，不要把这几个字当作剧情事实，直接按照接受版大纲、最近聊天和当前节奏推进下一楼。只输出本次剧情正文，不要大纲、总结、设定说明。`;
 }
 
 function updateContinuityPrompt() {
@@ -2916,7 +3063,15 @@ async function continueStory() {
         state.currentTurn += 1;
         state.completedStoryMessages += 1;
         state.completedStorySnapshot = `${state.completedStorySnapshot}\n${content}`.trim().slice(-12000);
-        generated.extra = { ...(generated.extra || {}), storyOutlineStudio: { version: state.outlineVersion, turn: state.currentTurn } };
+        state.userTurnCount += 1;
+        generated.extra = {
+            ...(generated.extra || {}),
+            storyOutlineStudio: {
+                version: state.outlineVersion,
+                turn: state.currentTurn,
+                countedInteraction: true,
+            },
+        };
         saveState();
         await ctx.saveChat?.();
         rerender();
@@ -2985,6 +3140,7 @@ function installEvents() {
         if (!state || !state.outlineAccepted) return;
         const message = Number.isInteger(messageIndex) ? ctx.chat?.[messageIndex] : null;
         if (!message?.is_user || isContinuationDirective(message.mes)) return;
+        if (message?.extra?.storyOutlineStudio?.countedInteraction) return;
         state.userTurnCount += 1;
         saveState();
     });
