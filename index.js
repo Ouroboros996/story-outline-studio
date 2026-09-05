@@ -1369,9 +1369,12 @@ function stageComplete(stage) {
     return stage === 'config' ? Boolean(state.config.backgrounds.length || customValues('backgrounds').length) : stage === 'persona' ? state.userPersonaAccepted : stage === 'outline' ? state.outlineAccepted : stage === 'npc' ? state.npcsAccepted : state.currentTurn > 0;
 }
 
-function openPanel(stage = activeStage) {
+function openPanel(stage = activeStage, reloadState = true) {
     refreshContext();
-    state = getState();
+    // A rerender can happen immediately after generation, before SillyTavern's
+    // debounced metadata write completes. Keep the in-memory result for that
+    // render instead of replacing it with the previous chat snapshot.
+    if (reloadState || !state) state = getState();
     activeStage = stage;
     if (!panel) {
         panel = document.createElement('div');
@@ -1422,7 +1425,7 @@ function rerender() {
     const focusedChip = focused?.classList?.contains('sos-chip')
         ? { category: focused.dataset.category, value: focused.dataset.value }
         : null;
-    openPanel(activeStage);
+    openPanel(activeStage, false);
     const restore = () => {
         const nextMain = panel.querySelector('.sos-main');
         if (nextMain) nextMain.scrollTop = scrollTop;
