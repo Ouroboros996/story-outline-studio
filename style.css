@@ -1,4 +1,5 @@
 #sos-overlay {
+    --sos-zoom: 1;
     --sos-ink: #e9edf3;
     --sos-muted: #9da8b7;
     --sos-line: rgba(191, 205, 222, 0.16);
@@ -22,13 +23,13 @@
 #sos-overlay.minimized { display: block; pointer-events: none; background: transparent; }
 #sos-overlay.minimized .sos-panel { display: none; }
 #sos-overlay.busy { cursor: progress; }
-.sos-panel { width: min(1180px, 100%); height: min(900px, 94vh); max-height: calc(100dvh - 56px); display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; background: var(--sos-panel); border: 1px solid var(--sos-line); box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48); overflow: hidden; }
+.sos-panel { width: min(1180px, 100%); height: min(900px, 94vh); max-height: calc(100dvh - 56px); display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; background: var(--sos-panel); border: 1px solid var(--sos-line); box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48); overflow: hidden; zoom: var(--sos-zoom); }
 .sos-header { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 22px 28px; border-bottom: 1px solid var(--sos-line); background: #12161c; }
 .sos-header > div:first-child { min-width: 0; }
 .sos-brand, .sos-kicker { color: var(--sos-accent); font-size: 10px; letter-spacing: 1.8px; font-weight: 700; }
 .sos-header h1 { margin: 5px 0 0; font-size: 25px; letter-spacing: 0; }
 .sos-header-actions { display: flex; flex: 0 0 auto; gap: 8px; }
-.sos-header-button, .sos-icon-button { border: 1px solid var(--sos-line); background: transparent; color: var(--sos-muted); width: 34px; height: 34px; min-width: 40px; min-height: 40px; cursor: pointer; }
+.sos-header-button, .sos-icon-button { border: 1px solid var(--sos-line); background: transparent; color: var(--sos-muted); width: 34px; height: 34px; min-width: 44px; min-height: 44px; cursor: pointer; touch-action: manipulation; }
 .sos-header-button:hover, .sos-icon-button:hover { color: var(--sos-ink); border-color: var(--sos-accent); }
 .sos-stage-nav { display: flex; gap: 2px; padding: 10px 20px 0; background: #12161c; border-bottom: 1px solid var(--sos-line); overflow-x: auto; }
 .sos-stage-nav button { flex: 0 0 auto; min-width: 120px; padding: 12px 15px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--sos-muted); cursor: pointer; text-align: left; }
@@ -103,7 +104,7 @@
 .sos-story-status { display: flex; flex-wrap: wrap; gap: 18px; padding: 15px; border-left: 3px solid var(--sos-accent-2); background: var(--sos-panel-2); color: var(--sos-muted); font-size: 13px; }
 .sos-footer { display: flex; justify-content: space-between; gap: 12px; padding: 9px 20px; border-top: 1px solid var(--sos-line); color: var(--sos-muted); font-size: 11px; }
 .sos-wand-button { cursor: pointer; pointer-events: auto; }
-.sos-restore-button { display: none; position: fixed; right: calc(14px + env(safe-area-inset-right)); bottom: calc(14px + env(safe-area-inset-bottom)); z-index: 10001; width: 42px; height: 42px; border: 1px solid var(--sos-accent); background: var(--sos-panel); color: var(--sos-accent); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.38); cursor: pointer; pointer-events: auto; }
+.sos-restore-button { display: none; position: fixed; right: calc(14px + env(safe-area-inset-right)); bottom: calc(14px + env(safe-area-inset-bottom)); z-index: 10001; width: 44px; height: 44px; min-width: 44px; min-height: 44px; border: 1px solid var(--sos-accent); background: var(--sos-panel); color: var(--sos-accent); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.38); cursor: pointer; pointer-events: auto; touch-action: manipulation; }
 .sos-switch { display: inline-flex; align-items: center; gap: 9px; min-height: 40px; color: var(--sos-ink); cursor: pointer; }
 .sos-switch input { width: 18px !important; height: 18px; margin: 0; accent-color: var(--sos-accent); }
 #sos-overlay.minimized .sos-restore-button { display: flex; align-items: center; justify-content: center; }

@@ -93,6 +93,8 @@ let state = null;
 let activeStage = 'config';
 let panel = null;
 let generating = false;
+let generationEpoch = 0;
+let activeChatKey = '';
 let buttonRetryTimer = null;
 let buttonRetryCount = 0;
 let loadedReferenceWorldBooks = new Map();
@@ -610,6 +612,7 @@ function defaultState() {
         referenceWorldBookName: '',
         attachedWorldBookName: '',
         lastGeneratedAt: 0,
+        zoom: 1,
         lastGeneration: {
             kind: '',
             rawPreview: '',
@@ -628,6 +631,7 @@ function getState() {
     next.config.relationships = unique(next.config.relationships);
     next.config.tropes = unique(next.config.tropes);
     next.config.streamStructured = Boolean(next.config.streamStructured);
+    next.zoom = Math.min(1.2, Math.max(0.8, Number(next.zoom) || 1));
     next.userPersonaData = next.userPersonaData && typeof next.userPersonaData === 'object' ? next.userPersonaData : {};
     next.outlineData = next.outlineData && typeof next.outlineData === 'object' ? next.outlineData : {};
     if (!Object.values(next.userPersonaData).some(Boolean) && next.userPersona) {
@@ -1382,6 +1386,7 @@ function openPanel(stage = activeStage, reloadState = true) {
         document.body.append(panel);
     }
     panel.innerHTML = dashboardMarkup();
+    panel.style.setProperty('--sos-zoom', String(state.zoom || 1));
     panel.classList.remove('minimized');
     panel.classList.add('open');
     bindPanelEvents();
@@ -1399,6 +1404,7 @@ function closePanel() {
 function readPanelScrollPositions() {
     return {
         document: document.scrollingElement?.scrollTop || window.scrollY || 0,
+        main: panel?.querySelector('.sos-main')?.scrollTop || 0,
         grids: Object.fromEntries([...panel?.querySelectorAll('[data-sos-scroll]') || []].map(element => [element.dataset.sosScroll, element.scrollTop])),
     };
 }
@@ -1413,6 +1419,8 @@ function restorePanelScrollPositions(scrollPositions = {}) {
         const position = scrollPositions.grids?.[element.dataset.sosScroll];
         if (Number.isFinite(position)) element.scrollTop = position;
     }
+    const main = panel?.querySelector('.sos-main');
+    if (main && Number.isFinite(Number(scrollPositions.main))) main.scrollTop = Number(scrollPositions.main);
 }
 
 function rerender() {
@@ -1552,7 +1560,8 @@ function bindPanelEvents() {
 }
 
 async function handleAction(action, button) {
-    if (generating && action !== 'close') return;
+    const allowedWhileGenerating = new Set(['close', 'minimize', 'restore', 'reset-project', 'zoom-in', 'zoom-out']);
+    if (generating && !allowedWhileGenerating.has(action)) return;
     if (action === 'close') return closePanel();
     if (action === 'minimize') {
         panel?.classList.add('minimized');
@@ -1562,9 +1571,24 @@ async function handleAction(action, button) {
         panel?.classList.remove('minimized');
         return;
     }
+    if (action === 'zoom-in' || action === 'zoom-out') {
+        const scrollPositions = readPanelScrollPositions();
+        const delta = action === 'zoom-in' ? 0.1 : -0.1;
+        state.zoom = Math.min(1.2, Math.max(0.8, Math.round((Number(state.zoom || 1) + delta) * 10) / 10));
+        saveState();
+        panel?.style.setProperty('--sos-zoom', String(state.zoom));
+        restorePanelScrollPositions(scrollPositions);
+        return;
+    }
     if (action === 'reset-project') {
         const ok = await ctx.callGenericPopup('清空当前聊天的剧情工作台状态？已写入世界书的 NPC 不会被删除。', POPUP_TYPE.CONFIRM);
-        if (ok) { state = defaultState(); saveState(); activeStage = 'config'; rerender(); }
+        if (ok) {
+            generationEpoch += 1;
+            state = defaultState();
+            saveState();
+            activeStage = 'config';
+            rerender();
+        }
         return;
     }
     if (action === 'refresh-worldbooks') {
@@ -2287,14 +2311,20 @@ async function generateJson(prompt, schema, responseLength = 1200, { allowText =
         // optional in newer cores but is rejected by many proxies.
         return ctx.generateQuietPrompt(params);
     };
-    let result;
+    const requestEpoch = generationEpoch;
     const kind = generationKind(schema);
-    let repairError = '';
+    let result;
     try {
         result = await request();
+        if (requestEpoch !== generationEpoch) {
+            const error = new Error('当前工作台已清理，旧请求结果已丢弃。');
+            error.sosStale = true;
+            throw error;
+        }
     } catch (error) {
         const wrapped = wrapGenerationError(error);
-        saveGenerationSnapshot(kind, { error: wrapped.message });
+        if (error?.sosStale) wrapped.sosStale = true;
+        if (!error?.sosStale) saveGenerationSnapshot(kind, { error: wrapped.message });
         throw wrapped;
     }
     const embeddedError = responseErrorMessage(result);
@@ -2314,67 +2344,21 @@ async function generateJson(prompt, schema, responseLength = 1200, { allowText =
         saveGenerationSnapshot(kind, { raw });
         return parsed;
     }
-
-    // A few local gateway adapters resolve the first request with no body
-    // even though the generation call itself succeeded. Retry only this
-    // empty-body case; network/TLS failures are thrown above and are never
-    // retried here.
-    if (!raw) {
-        try {
-            const retryResult = await request('\n上一次请求没有返回正文。请重新生成一次，只输出完整结果，不要解释。');
-            const retryEmbeddedError = responseErrorMessage(retryResult);
-            if (retryEmbeddedError) throw wrapGenerationError(new Error(retryEmbeddedError));
-            raw = extractAssistantContent(retryResult).trim() || extractGeneratedText(retryResult).trim();
-            if (isUpstreamErrorText(raw)) throw wrapGenerationError(new Error(raw));
-            parsed = parseGeneratedPayload(raw, allowText, schema);
-            if (parsed && hasGeneratedShape(parsed, schema)) {
-                saveGenerationSnapshot(kind, { raw });
-                return parsed;
-            }
-        } catch (error) {
-            const wrappedRetryError = wrapGenerationError(error);
-            repairError = `空响应重试失败：${wrappedRetryError.message}`;
-            saveGenerationSnapshot(kind, { error: repairError });
-            throw wrappedRetryError;
-        }
-    }
-
-    // One short repair pass handles models that prepend a refusal, code fence,
-    // or an incomplete tag. It still uses the same normal text endpoint and
-    // therefore preserves compatibility with the selected preset/API.
-    if (raw) {
-        try {
-            const repaired = await request(`\n上一次返回未被识别。请只把下面的内容整理成指定标签协议并重新输出，不要解释：\n${limitPromptText(raw, 12000)}`);
-            const repairedEmbeddedError = responseErrorMessage(repaired);
-            if (repairedEmbeddedError) throw wrapGenerationError(new Error(repairedEmbeddedError));
-            const repairedRaw = extractAssistantContent(repaired).trim() || extractGeneratedText(repaired).trim();
-            if (isUpstreamErrorText(repairedRaw)) throw wrapGenerationError(new Error(repairedRaw));
-            const repairedParsed = parseGeneratedPayload(repairedRaw, allowText, schema);
-            if (repairedParsed && hasGeneratedShape(repairedParsed, schema)) {
-                saveGenerationSnapshot(kind, { raw, repaired: repairedRaw });
-                return repairedParsed;
-            }
-            saveGenerationSnapshot(kind, { raw, repaired: repairedRaw, error: '整理后的响应仍缺少必要字段' });
-        } catch (error) {
-            const wrappedRepairError = wrapGenerationError(error);
-            repairError = `整理请求失败：${wrappedRepairError.message}`;
-            saveGenerationSnapshot(kind, { raw, error: repairError });
-            console.warn(`[${EXTENSION_ID}] response repair request failed`, error);
-        }
-    } else {
-        saveGenerationSnapshot(kind, { error: '上游返回空内容' });
-    }
-
+    saveGenerationSnapshot(kind, {
+        raw,
+        error: raw ? '响应无法识别为所需结构' : '上游返回空内容',
+    });
     const preview = limitPromptText(raw, 240);
     console.warn(`[${EXTENSION_ID}] structured response could not be parsed`, { type: typeof result, preview });
-    if (!raw) throw new Error('AI 请求已完成，但上游返回了空内容。请重试，并检查 API 的最大输出长度。');
-    throw new Error(`AI 返回内容无法识别为 JSON、标签或字段文本，请重试。当前草稿已保留。响应摘要：${preview}${repairError ? `；${repairError}` : ''}`);
+    if (!raw) throw new Error('AI 请求已完成，但上游返回了空内容。');
+    throw new Error(`AI 返回内容无法识别为 JSON、标签或字段文本，请重试。响应摘要：${preview}`);
 }
 
 async function generateJsonForeground(prompt, schema, { allowText = false, patchTag = '' } = {}) {
     // SillyTavern 1.17 deliberately excludes quiet requests from its streaming
     // processor. A foreground request is the only honest way to expose native
     // streaming, so its structured draft is intentionally retained in chat.
+    const requestEpoch = generationEpoch;
     const fullTag = schema?.properties?.npcs ? '<npcs><npc>每个字段一行：内容</npc></npcs>' : schema?.properties?.name && !schema?.properties?.opening ? '<persona>每个字段一行：内容</persona>' : '<outline>开端：...\n发展：...\n转折：...\n高潮：...\n结局：...</outline>';
     const patchProtocol = patchTag
         ? `本次是局部修改，只输出被修改的字段，不要重写未修改内容：<${patchTag}>字段：新内容</${patchTag}>。NPC 修改时使用 <npc_patch name="目标姓名">字段：新内容</npc_patch>。`
@@ -2418,6 +2402,11 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
             skipWIAN: true,
             force_name2: true,
         });
+        if (requestEpoch !== generationEpoch) {
+            const error = new Error('当前工作台已清理，旧请求结果已丢弃。');
+            error.sosStale = true;
+            throw error;
+        }
         generated = (ctx.chat || []).slice(beforeLength)
             .filter(message => !message.is_user && text(message?.mes))
             .at(-1);
@@ -2430,7 +2419,8 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
         }
     } catch (error) {
         const wrapped = wrapGenerationError(error);
-        saveGenerationSnapshot(kind, { error: wrapped.message });
+        if (error?.sosStale) wrapped.sosStale = true;
+        if (!error?.sosStale) saveGenerationSnapshot(kind, { error: wrapped.message });
         throw wrapped;
     } finally {
         if (temporaryUserMessage && Array.isArray(ctx.chat)) {
@@ -2453,6 +2443,11 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
     if (!generated || !raw) {
         const error = new Error('酒馆请求已完成，但没有写入结构化草稿消息。请检查 API 响应和酒馆控制台。');
         saveGenerationSnapshot(kind, { error: error.message });
+        throw error;
+    }
+    if (requestEpoch !== generationEpoch) {
+        const error = new Error('当前工作台已清理，旧请求结果已丢弃。');
+        error.sosStale = true;
         throw error;
     }
     if (isUpstreamErrorText(raw)) {
@@ -2485,10 +2480,12 @@ async function generateStructured(prompt, schema, responseLength, options = {}) 
 async function withGenerating(task) {
     if (generating) return;
     generating = true;
+    const taskEpoch = generationEpoch;
     panel?.classList.add('busy');
     try {
-        await task();
+        await task(taskEpoch);
     } catch (error) {
+        if (error?.sosStale || taskEpoch !== generationEpoch) return;
         console.error(`[${EXTENSION_ID}]`, error);
         // generateQuietPrompt may already have shown the upstream API error.
         // Do not add a second toast for the same failed request.
@@ -2650,36 +2647,47 @@ async function generateOutline(feedback = '', mode = 'new') {
         // and its metadata. The selected length is a pacing hint, not a token
         // ceiling, and the local formatter no longer truncates the response.
         const outlineResponseLength = state.config.length === 'long' ? 12000 : 8000;
-        let outlineData = null;
-        let outline = '';
-        for (let attempt = 0; attempt < (mode === 'new' ? 3 : 1); attempt++) {
-            const attemptPrompt = attempt
-                ? `${prompt}\n上一次返回的大纲与历史版本过于相似。请彻底更换冲突、场景顺序、因果链、高潮和结局落点，重新输出完整五段；本次重试标识：${generationNonce('outline-retry', attempt)}。`
-                : prompt;
-            const result = await generateStructured(attemptPrompt, outlineSchema(), outlineResponseLength, { allowText: true, patchTag: mode === 'revise' ? 'outline_patch' : '' });
-            const candidate = mode === 'revise'
-                ? mergeOutlineData(
-                    state.outlineData,
-                    (() => {
-                        const next = normalizeOutlineData(result, result.outline ? '' : text(result));
-                        const restricted = restrictOutlineRevision(next, feedback);
-                        return Object.keys(restricted).length ? restricted : diffOutlineFields(state.outlineData, next);
-                    })(),
-                )
-                : normalizeOutlineData(result, result.outline ? '' : text(result));
-            if (!candidate.opening || !candidate.development || !candidate.turningPoint || !candidate.climax || !candidate.ending) {
-                throw new Error('AI 返回的大纲缺少完整的开端、发展、转折、高潮或结局，请重试。');
-            }
-            const minimumCharacterNames = state.config.relationshipMode === 'NP' ? 3 : 2;
-            if (mode === 'new' && currentName && candidate.characterNames.length < minimumCharacterNames) continue;
-            if (currentName && oldUserNames.length && containsAnyName(outlineText(candidate), oldUserNames)) continue;
-            if (currentName) candidate.characterNames = unique([currentName, ...candidate.characterNames]);
-            if (mode === 'new' && hasDuplicateOutline(candidate, outlineHistory)) continue;
-            outlineData = candidate;
-            outline = fitOutlineSections(candidate);
-            break;
+        const result = await generateStructured(
+            prompt,
+            outlineSchema(),
+            outlineResponseLength,
+            { allowText: true, patchTag: mode === 'revise' ? 'outline_patch' : '' },
+        );
+        const outlineData = mode === 'revise'
+            ? mergeOutlineData(
+                state.outlineData,
+                (() => {
+                    const next = normalizeOutlineData(result, result.outline ? '' : text(result));
+                    const restricted = restrictOutlineRevision(next, feedback);
+                    return Object.keys(restricted).length
+                        ? restricted
+                        : diffOutlineFields(state.outlineData, next);
+                })(),
+            )
+            : normalizeOutlineData(result, result.outline ? '' : text(result));
+
+        if (!outlineData.opening
+            || !outlineData.development
+            || !outlineData.turningPoint
+            || !outlineData.climax
+            || !outlineData.ending) {
+            throw new Error('AI 返回的大纲缺少完整的开端、发展、转折、高潮或结局，请重试。');
         }
-        if (!outlineData || !outline) throw new Error('AI 返回的大纲与历史版本过于相似，已自动重试仍未得到新路线；本次结果未覆盖当前大纲。');
+        const minimumCharacterNames = state.config.relationshipMode === 'NP' ? 3 : 2;
+        if (mode === 'new' && currentName && outlineData.characterNames.length < minimumCharacterNames) {
+            throw new Error('AI 返回的大纲缺少足够的主要角色姓名，已拒绝写入；当前大纲未被覆盖。');
+        }
+        if (currentName && oldUserNames.length
+            && containsAnyName(outlineText(outlineData), oldUserNames)) {
+            throw new Error('AI 返回的大纲仍包含旧 user 姓名，已拒绝写入；当前大纲未被覆盖。');
+        }
+        if (currentName) {
+            outlineData.characterNames = unique([
+                currentName,
+                ...outlineData.characterNames,
+            ]);
+        }
+        const outline = fitOutlineSections(outlineData);
         if (state.outline) {
             state.outlineRevisions.push({ version: state.outlineVersion, outline: state.outline, outlineData: clone(state.outlineData), accepted: state.outlineAccepted, createdAt: Date.now() });
         }
@@ -2736,48 +2744,29 @@ async function generateNpcs(feedback = '', mode = 'new') {
             : '关系数量为 1V1：生成 1 名主要恋爱 NPC；只有在大纲明确需要且对主线有作用时，才额外生成少量功能 NPC。';
         const npcSchema = { type: 'object', properties: { npcs: { type: 'array', minItems: state.config.relationshipMode === 'NP' && mode === 'new' ? 2 : 1, items: { type: 'object', properties: { name: { type: 'string' }, aliases: { type: 'array', items: { type: 'string' } }, gender: { type: 'string' }, age: { type: 'string' }, height: { type: 'string' }, appearance: { type: 'string' }, personality: { type: 'string' }, identity: { type: 'string' }, past: { type: 'string' }, relationship: { type: 'string' }, attitude: { type: 'string' }, quotes: { type: 'array', items: { type: 'string' } }, nsfw: { type: 'string' }, body: { type: 'string' } }, required: ['name', 'aliases', 'gender', 'age', 'height', 'appearance', 'personality', 'identity', 'past', 'relationship', 'attitude', 'quotes', 'nsfw', 'body'] } } }, required: ['npcs'] };
         const prompt = `${basePrompt()}\n当前 user 唯一姓名：${currentName || '尚未确定'}。NPC 与 user 的关系必须匹配这个姓名，不得把旧 user 人设、旧聊天或参考资料中的其他人当作当前 user。\n已接受的大纲：${state.outline}\n请生成该大纲所需的全部主要 NPC。${npcCountRule}必须返回至少 1 人且每个字段完整；如果大纲包含成人内容，相关 NPC 的年龄字段必须明确为成年人。严格按以下顺序输出每一名 NPC，第一行必须是 name（姓名）：name、aliases（称呼/关键词）、gender、age、height、appearance、personality、identity、past、relationship、attitude、quotes、nsfw、body。没有完成一个 NPC 的全部字段前，不得开始下一个 NPC。先简洁、完整地写完所有 NPC，再补充细节；不得用省略号或“内容已截断”代替字段。每名 NPC 都必须单独使用完整的 <npc>...</npc>，最后闭合 </npcs>。不得输出分析、解释、前言或 Markdown。外貌要有至少两条可识别细节，不能都是模板化帅哥美女；性格必须能从身份和过去经历合理推出，不能自相矛盾。NSFW 字段只写成年角色的偏好、体位和语言风格，不改变人物性格。关键词必须覆盖姓名、昵称、去姓名、user 对其特殊称呼。${previous}${novelty}${revision}\n如果无法返回 JSON，请使用 <npcs><npc>字段：内容</npc></npcs>，不要解释。`;
-        let nextNpcs = [];
-        let nameConflict = false;
-        for (let attempt = 0; attempt < (mode === 'new' ? 3 : 1); attempt++) {
-            const attemptPrompt = attempt ? `${prompt}\n上一次结果与历史姓名冲突。请彻底改写全部姓名和人物方案，重新输出一套不重复的完整 NPC；本次重试标识：${generationNonce('npc-retry', attempt)}。` : prompt;
-            const result = await generateStructured(attemptPrompt, npcSchema, state.config.relationshipMode === 'NP' ? 16000 : 10000, { allowText: true, patchTag: mode === 'revise' ? 'npc_patch' : '' });
-            nextNpcs = mode === 'revise'
-                ? mergeNpcDrafts(
-                    state.npcs,
-                    (() => {
-                        const restricted = restrictNpcRevision(result.npcs, feedback, state.npcs);
-                        return restricted.length ? restricted : diffNpcFields(state.npcs, result.npcs, feedback);
-                    })(),
-                    feedback,
-                )
-                : Array.isArray(result.npcs) ? normalizeNpcCollection(result.npcs) : [];
-            if (!nextNpcs.length) continue;
-            const candidateNames = nextNpcs.map(npc => canonicalText(npc.name)).filter(Boolean);
-            const duplicateName = npcNameCollision(nextNpcs, previousNames);
-            if (!duplicateName) break;
-            nameConflict = true;
-            nextNpcs = [];
-        }
-        if (!nextNpcs.length) {
-            throw new Error(nameConflict
-                ? 'AI 连续返回了重复或冲突的 NPC 姓名，已拒绝写入；当前 NPC 草稿未被覆盖。请再次重 roll。'
-                : 'AI 没有返回主要 NPC，请重试；当前 NPC 草稿已保留。');
-        }
+        const result = await generateStructured(
+            prompt,
+            npcSchema,
+            state.config.relationshipMode === 'NP' ? 16000 : 10000,
+            { allowText: true, patchTag: mode === 'revise' ? 'npc_patch' : '' },
+        );
+        let nextNpcs = mode === 'revise'
+            ? mergeNpcDrafts(
+                state.npcs,
+                (() => {
+                    const restricted = restrictNpcRevision(result.npcs, feedback, state.npcs);
+                    return restricted.length
+                        ? restricted
+                        : diffNpcFields(state.npcs, result.npcs, feedback);
+                })(),
+                feedback,
+            )
+            : Array.isArray(result.npcs)
+                ? normalizeNpcCollection(result.npcs)
+                : [];
 
-        // NP models occasionally stop after one character despite the count
-        // rule. Keep that valid draft and make one focused request for only
-        // the missing cast instead of rerolling or discarding it.
-        if (mode === 'new' && state.config.relationshipMode === 'NP' && nextNpcs.length < 2) {
-            const existingNames = nextNpcs.map(npc => npc.name).filter(Boolean);
-            try {
-                const supplementPrompt = `${basePrompt()}\n已接受的大纲：${state.outline}\n当前已经生成的主要 NPC：${JSON.stringify(nextNpcs)}\nNP 模式至少需要 2 名主要 NPC，现在只有 ${nextNpcs.length} 名。请只补充至少 ${2 - nextNpcs.length} 名新的 NPC，承担大纲中尚未覆盖的关系线、冲突线或 NSFW 节点；若涉及成人内容，新 NPC 的年龄字段必须明确为成年人。不得重写或重复以下角色：${existingNames.join('、') || '已有角色'}。先完整写完所有新增 NPC，再补充细节；不得省略字段，不得用省略号。只输出 <npcs><npc>完整字段</npc></npcs>。`;
-                const supplement = await generateStructured(supplementPrompt, { ...npcSchema, properties: { ...npcSchema.properties, npcs: { ...npcSchema.properties.npcs, minItems: 1 } } }, 10000, { allowText: true });
-                const knownNames = [...previousNames, ...nextNpcs.flatMap(npc => [npc.name, ...npc.aliases])];
-                const additions = (supplement.npcs || []).map(normalizeNpc).filter(npc => npc.name && !npcNameCollision([npc], knownNames));
-                nextNpcs = [...nextNpcs, ...additions];
-            } catch (error) {
-                throw new Error(`NP 模式仍未生成足够且不重复的 NPC：${error.message || '补充请求失败'}`);
-            }
+        if (!nextNpcs.length) {
+            throw new Error('AI 没有返回主要 NPC，请重试；当前 NPC 草稿已保留。');
         }
 
         nextNpcs = normalizeNpcCollection(nextNpcs);
@@ -2788,7 +2777,12 @@ async function generateNpcs(feedback = '', mode = 'new') {
             throw new Error('NP 模式必须生成至少 2 名互不重复的主要 NPC，当前结果已拒绝写入。');
         }
         state.npcs = nextNpcs;
-        if (mode === 'new') state.npcNameHistory = unique([...state.npcNameHistory, ...nextNpcs.flatMap(npc => [npc.name, ...npc.aliases])]).slice(-80);
+        if (mode === 'new') {
+            state.npcNameHistory = unique([
+                ...state.npcNameHistory,
+                ...nextNpcs.flatMap(npc => [npc.name, ...npc.aliases]),
+            ]).slice(-80);
+        }
         state.npcsAccepted = false;
         saveState();
         activeStage = 'npc';
@@ -3113,7 +3107,16 @@ function installButton() {
     if (!existing) menu.append(container);
     buttonRetryCount = 0;
     container.title = '打开剧情大纲工作台';
-    const open = () => { refreshContext(); state = getState(); openPanel('config'); };
+    const open = () => {
+        refreshContext();
+        const nextKey = contextCacheKey(ctx);
+        if (activeChatKey !== nextKey) {
+            activeChatKey = nextKey;
+            generationEpoch += 1;
+            state = getState();
+        }
+        openPanel('config', false);
+    };
     container.onclick = open;
     container.querySelector('.sos-wand-button')?.addEventListener('click', event => {
         event.stopPropagation();
@@ -3124,7 +3127,17 @@ function installButton() {
 function installSlashCommand() {
     try {
         if (SlashCommandParser.commands['sos-continue'] || SlashCommandParser.commands['story-continue']) return;
-        SlashCommandParser.addCommandObject(SlashCommand.fromProps({ name: 'sos-continue', aliases: ['story-continue'], helpString: '使用剧情大纲工作台继续下一楼剧情', callback: async () => { refreshContext(); state = getState(); await continueStory(); return ''; } }));
+        SlashCommandParser.addCommandObject(SlashCommand.fromProps({ name: 'sos-continue', aliases: ['story-continue'], helpString: '使用剧情大纲工作台继续下一楼剧情', callback: async () => {
+            refreshContext();
+            const nextKey = contextCacheKey(ctx);
+            if (activeChatKey !== nextKey) {
+                activeChatKey = nextKey;
+                generationEpoch += 1;
+                state = getState();
+            }
+            await continueStory();
+            return '';
+        } }));
     } catch (error) {
         // A command registration conflict must not disable the visual workbench.
         console.warn(`[${EXTENSION_ID}] slash command registration skipped`, error);
@@ -3134,10 +3147,16 @@ function installSlashCommand() {
 function installEvents() {
     ctx.eventSource?.on?.(ctx.eventTypes.CHAT_CHANGED, () => {
         refreshContext();
-        state = getState();
+        const nextKey = contextCacheKey(ctx);
+        if (activeChatKey !== nextKey) {
+            activeChatKey = nextKey;
+            generationEpoch += 1;
+            state = getState();
+            activeStage = 'config';
+        }
         void refreshAvailableWorldBooks(true);
         updateContinuityPrompt();
-        if (panel?.classList.contains('open')) { activeStage = 'config'; rerender(); }
+        if (panel?.classList.contains('open')) rerender();
     });
     ctx.eventSource?.on?.(ctx.eventTypes.MESSAGE_SENT, messageIndex => {
         if (!state || !state.outlineAccepted) return;
@@ -3157,6 +3176,7 @@ async function init() {
     try {
         await dependencyPromise;
         refreshContext();
+        activeChatKey = contextCacheKey(ctx);
         state = getState();
         installButton();
     } catch (error) {
@@ -3185,15 +3205,25 @@ window.storyOutlineStudio = {
         await init();
         if (!initialized) throw dependencyError || new Error('剧情大纲工作台初始化失败，请查看酒馆控制台。');
         refreshContext();
-        state = getState();
-        openPanel('config');
+        const nextKey = contextCacheKey(ctx);
+        if (activeChatKey !== nextKey) {
+            activeChatKey = nextKey;
+            generationEpoch += 1;
+            state = getState();
+        }
+        openPanel('config', false);
     },
     getState: () => state ? clone(state) : null,
     continue: async () => {
         await init();
         if (!initialized) throw dependencyError || new Error('剧情大纲工作台初始化失败，请查看酒馆控制台。');
         refreshContext();
-        state = getState();
+        const nextKey = contextCacheKey(ctx);
+        if (activeChatKey !== nextKey) {
+            activeChatKey = nextKey;
+            generationEpoch += 1;
+            state = getState();
+        }
         return continueStory();
     },
 };
