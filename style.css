@@ -150,7 +150,34 @@
 
 .sos-restore-button { display: none; position: fixed; right: calc(14px + env(safe-area-inset-right)); bottom: calc(14px + env(safe-area-inset-bottom)); z-index: 10001; width: 46px; height: 46px; min-width: 44px; min-height: 44px; border: 1px solid var(--sos-accent); border-radius: 6px; background: #ffffff; color: var(--sos-accent-dark); box-shadow: 0 8px 24px rgba(26, 58, 75, 0.2); cursor: pointer; pointer-events: auto; touch-action: manipulation; }
 .sos-switch { display: inline-flex; align-items: center; gap: 9px; min-height: 40px; color: var(--sos-ink); cursor: pointer; }
-.sos-switch input { width: 18px !important; height: 18px; margin: 0; accent-color: var(--sos-accent); }
+
+/* Keep the check mark readable on the light theme in every browser. */
+#sos-overlay input[type="checkbox"] {
+    appearance: none;
+    width: 20px !important;
+    height: 20px;
+    flex: 0 0 20px;
+    margin: 0;
+    border: 1px solid #78909d;
+    border-radius: 4px;
+    background: #ffffff;
+    cursor: pointer;
+    accent-color: var(--sos-accent);
+}
+
+#sos-overlay input[type="checkbox"]:checked {
+    border-color: #4f6673;
+    background-color: #ffffff;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5 6.3 12 13 4.5' fill='none' stroke='%2317324a' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: 14px 14px;
+}
+
+#sos-overlay input[type="checkbox"]:hover { border-color: var(--sos-accent-dark); }
+#sos-overlay input[type="checkbox"]:focus-visible { outline: 2px solid rgba(45, 155, 120, 0.28); outline-offset: 2px; }
+#sos-overlay input[type="checkbox"]:disabled { cursor: not-allowed; opacity: 0.5; }
+#sos-overlay input[type="checkbox"]:checked + span { color: var(--sos-ink); }
 #sos-overlay.minimized .sos-restore-button { display: flex; align-items: center; justify-content: center; }
 .sos-restore-button:hover { color: #ffffff; background: var(--sos-accent); }
 
