@@ -558,17 +558,22 @@ function hasSameOutlineCast(first, second) {
 
 function worldBookSortKey(name) {
     const source = [...text(name)][0] || '';
-    if (/^\p{Extended_Pictographic}/u.test(source) || /^[\u{1F1E6}-\u{1F1FF}]/u.test(source)) return 0;
-    if (/^\p{Number}/u.test(source)) return 1;
+    if (!source) return 0;
+    // Group names for scanning: symbols/emoji first, numeric names second,
+    // then names beginning with letters.
+    if (!/^\p{L}/u.test(source) && !/^\p{N}/u.test(source)) return 0;
+    if (/^\p{N}/u.test(source)) return 1;
     return 2;
 }
 
 function compareWorldBookNames(first, second) {
     const firstText = text(first);
     const secondText = text(second);
-    const category = worldBookSortKey(firstText) - worldBookSortKey(secondText);
+    const firstCategory = worldBookSortKey(firstText);
+    const secondCategory = worldBookSortKey(secondText);
+    const category = firstCategory - secondCategory;
     if (category) return category;
-    if (worldBookSortKey(firstText) === 0) {
+    if (firstCategory === 0) {
         const firstCodePoint = [...firstText][0]?.codePointAt(0) || 0;
         const secondCodePoint = [...secondText][0]?.codePointAt(0) || 0;
         if (firstCodePoint !== secondCodePoint) return firstCodePoint - secondCodePoint;
@@ -624,6 +629,7 @@ function defaultState() {
         completedStoryMessages: 0,
         trackedStoryMessageKeys: [],
         worldBookName: '',
+        npcWorldBookName: '',
         referenceWorldBookName: '',
         attachedWorldBookName: '',
         lastGeneratedAt: 0,
@@ -676,6 +682,7 @@ function getState() {
         ? unique(next.trackedStoryMessageKeys).slice(-200)
         : [];
     next.storyId = text(next.storyId);
+    next.npcWorldBookName = text(next.npcWorldBookName);
     next.referenceWorldBookName = text(next.referenceWorldBookName);
     next.lastGeneration = next.lastGeneration && typeof next.lastGeneration === 'object'
         ? {
@@ -1468,11 +1475,15 @@ function npcField(label, value, index, field, multiline = false) {
 
 function npcMarkup() {
     const cards = state.npcs.map((npc, index) => `<article class="sos-npc-card ${npc.enabled === false ? 'disabled' : ''}"><header><label class="sos-switch sos-npc-enabled"><input type="checkbox" data-npc-index="${index}" data-npc-enabled ${npc.enabled !== false ? 'checked' : ''}><span>参与当前故事</span></label><input data-npc-index="${index}" data-npc-field="name" value="${escapeHtml(npc.name)}"><button type="button" class="sos-icon-button" data-action="delete-npc" data-index="${index}" title="删除 NPC"><i class="fa-solid fa-trash"></i></button></header><div class="sos-npc-grid">${npcField('称呼 / 关键词', asArray(npc.aliases).join('、'), index, 'aliases', true)}${npcField('性别', npc.gender, index, 'gender')}${npcField('年龄', npc.age, index, 'age')}${npcField('身高', npc.height, index, 'height')}${npcField('外貌与辨识度特征', npc.appearance, index, 'appearance', true)}${npcField('性格', npc.personality, index, 'personality', true)}${npcField('身份背景', npc.identity, index, 'identity', true)}${npcField('过去经历', npc.past, index, 'past', true)}${npcField('与 user 的关系', npc.relationship, index, 'relationship', true)}${npcField('对 user 的态度', npc.attitude, index, 'attitude', true)}${npcField('典型语录', asArray(npc.quotes).join('\n'), index, 'quotes', true)}${npcField('NSFW 偏好 / 体位 / 语言风格', npc.nsfw, index, 'nsfw', true)}${npcField('身体信息（可填写）', npc.body, index, 'body', true)}</div></article>`).join('');
+    const availableWorldBooks = getNpcWorldBookNames();
+    const selectedWorldBook = selectedNpcWorldBookName();
+    const explicitWorldBook = explicitNpcWorldBookName();
     const draftIssues = state.npcs.map(validateNpc).filter(Boolean);
     const draftNotice = draftIssues.length
         ? `<div class="sos-empty">AI 返回了可识别但不完整的 NPC 草稿，已先保留到列表。接受前请补全：${escapeHtml(draftIssues.join('；'))}</div>`
         : '';
-    return `<div class="sos-section-intro"><span class="sos-kicker">04 / NPC CAST</span><h2>审核主要 NPC</h2><p>关闭某个 NPC 后，它不会参与当前聊天的剧情上下文；不同聊天窗口各自保存 NPC 开关和故事进度。接受后会写入当前故事对应的世界书条目。</p></div>${generationDiagnosticsMarkup()}${draftNotice}<div class="sos-npc-list">${cards || '<div class="sos-empty">尚未生成 NPC。请先接受大纲。</div>'}</div><div class="sos-revise"><label>NPC 修改意见</label><textarea id="sos-npc-feedback" placeholder="例如：只修改第二名 NPC 的态度和过去经历，保留其他 NPC 及其余字段；补充一个右耳耳钉的辨识特征"></textarea></div><div class="sos-actions"><button type="button" class="sos-secondary" data-action="reroll-npc"><i class="fa-solid fa-dice"></i> 直接重 roll</button><button type="button" class="sos-secondary" data-action="revise-npc" ${cards ? '' : 'disabled'}><i class="fa-solid fa-pen"></i> 按意见修改</button><button type="button" class="sos-primary" data-action="accept-npc" ${cards ? '' : 'disabled'}><i class="fa-solid fa-book"></i> 接受并写入世界书</button></div>`;
+    const targetOptions = availableWorldBooks.map(name => `<option value="${escapeHtml(name)}" ${explicitWorldBook === name ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('');
+    return `<div class="sos-section-intro"><span class="sos-kicker">04 / NPC CAST</span><h2>审核主要 NPC</h2><p>关闭某个 NPC 后，它不会参与当前聊天的剧情上下文；不同聊天窗口各自保存 NPC 开关和故事进度。接受后会写入下面选择的目标世界书，默认使用角色卡绑定的世界书。</p></div>${generationDiagnosticsMarkup()}<div class="sos-worldbook-source sos-npc-worldbook-picker"><label for="sos-npc-worldbook">NPC 写入目标世界书</label><div class="sos-inline-control"><select id="sos-npc-worldbook"><option value="">自动选择：${escapeHtml(storyWorldBookName())}</option>${targetOptions}</select><button type="button" class="sos-icon-button" data-action="refresh-worldbooks" title="刷新酒馆世界书列表"><i class="fa-solid fa-rotate"></i></button></div><small>${explicitWorldBook ? `本次接受将把 NPC 条目写入“${escapeHtml(selectedWorldBook)}”。` : `当前自动目标为“${escapeHtml(selectedWorldBook)}”。可以切换到其他已导入世界书；不会创建额外的平行世界书。`}${worldBookListError ? ` 刷新失败：${escapeHtml(worldBookListError)}` : ''}</small></div>${draftNotice}<div class="sos-npc-list">${cards || '<div class="sos-empty">尚未生成 NPC。请先接受大纲。</div>'}</div><div class="sos-revise"><label>NPC 修改意见</label><textarea id="sos-npc-feedback" placeholder="例如：只修改第二名 NPC 的态度和过去经历，保留其他 NPC 及其余字段；补充一个右耳耳钉的辨识特征"></textarea></div><div class="sos-actions"><button type="button" class="sos-secondary" data-action="reroll-npc"><i class="fa-solid fa-dice"></i> 直接重 roll</button><button type="button" class="sos-secondary" data-action="revise-npc" ${cards ? '' : 'disabled'}><i class="fa-solid fa-pen"></i> 按意见修改</button><button type="button" class="sos-primary" data-action="accept-npc" ${cards ? '' : 'disabled'}><i class="fa-solid fa-book"></i> 接受并写入世界书</button></div>`;
 }
 
 function storyMarkup() {
@@ -1511,9 +1522,9 @@ function openPanel(stage = activeStage, reloadState = true) {
     panel.classList.remove('minimized');
     panel.classList.add('open');
     bindPanelEvents();
-    if (stage === 'config' && !worldBookListLoaded) {
+    if ((stage === 'config' || stage === 'npc') && !worldBookListLoaded) {
         void refreshAvailableWorldBooks().then(() => {
-            if (panel?.classList.contains('open') && activeStage === 'config') rerender();
+            if (panel?.classList.contains('open') && activeStage === stage) rerender();
         });
     }
 }
@@ -1635,6 +1646,14 @@ function bindPanelEvents() {
     panel.querySelector('#sos-reference-worldbook')?.addEventListener('change', async event => {
         try {
             await selectReferenceWorldBook(event.target.value);
+        } catch (error) {
+            toastr.error(error.message || '读取世界书失败');
+            rerender();
+        }
+    });
+    panel.querySelector('#sos-npc-worldbook')?.addEventListener('change', async event => {
+        try {
+            await selectNpcWorldBook(event.target.value);
         } catch (error) {
             toastr.error(error.message || '读取世界书失败');
             rerender();
@@ -1769,6 +1788,14 @@ function getAvailableWorldBookNames() {
     return [...new Set(names.map(text).filter(Boolean))].sort(compareWorldBookNames);
 }
 
+function getNpcWorldBookNames() {
+    return [...new Set([
+        ...getAvailableWorldBookNames(),
+        ...linkedReferenceWorldBookNames(),
+        text(state?.worldBookName),
+    ].filter(Boolean))].sort(compareWorldBookNames);
+}
+
 async function refreshAvailableWorldBooks(force = false) {
     refreshContext();
     if (worldBookListLoaded && !force) return getAvailableWorldBookNames();
@@ -1838,6 +1865,14 @@ function selectedReferenceWorldBookName() {
     return getLinkedReferenceWorldBookName();
 }
 
+function explicitNpcWorldBookName() {
+    return text(state?.npcWorldBookName);
+}
+
+function selectedNpcWorldBookName() {
+    return explicitNpcWorldBookName() || storyWorldBookName();
+}
+
 async function ensureReferenceWorldBookLoaded() {
     await refreshAvailableWorldBooks();
     const explicit = explicitReferenceWorldBookName();
@@ -1870,6 +1905,23 @@ async function selectReferenceWorldBook(name) {
     // the old metadata snapshot.
     state.referenceWorldBookName = requested;
     loadedReferenceWorldBooks.set(requested, data);
+    saveState();
+    rerender();
+}
+
+async function selectNpcWorldBook(name) {
+    const requested = text(name);
+    if (!requested) {
+        state.npcWorldBookName = '';
+        saveState();
+        rerender();
+        return;
+    }
+    const available = await refreshAvailableWorldBooks();
+    if (!available.includes(requested)) throw new Error('找不到所选目标世界书，可能已被删除；请刷新后重新选择。');
+    const data = await loadWorldInfo(requested);
+    if (!data) throw new Error(`无法读取目标世界书“${requested}”，请确认酒馆已加载该世界书。`);
+    state.npcWorldBookName = requested;
     saveState();
     rerender();
 }
@@ -3101,8 +3153,13 @@ async function acceptNpcs() {
     const invalid = state.npcs.map(validateNpc).find(Boolean);
     if (invalid) return toastr.warning(`${invalid} 请先修改。`);
     await withGenerating(async () => {
-        const bookName = storyWorldBookName();
-        const data = cloneWorldBookData(await loadWorldInfo(bookName));
+        const selected = explicitNpcWorldBookName();
+        const available = await refreshAvailableWorldBooks();
+        if (selected && !available.includes(selected)) throw new Error('所选目标世界书已不存在，请刷新列表后重新选择。');
+        const bookName = selected || storyWorldBookName();
+        const loaded = await loadWorldInfo(bookName);
+        if (selected && !loaded) throw new Error(`无法读取目标世界书“${bookName}”，NPC 未写入。`);
+        const data = cloneWorldBookData(loaded);
         if (!data.entries || typeof data.entries !== 'object') data.entries = {};
         const storyId = ensureStoryId();
         for (const [entryId, entry] of Object.entries(data.entries)) {
