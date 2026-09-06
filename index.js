@@ -1747,9 +1747,17 @@ function getCurrentCharacterBook() {
 
 function linkedReferenceWorldBookNames() {
     const names = [];
+    const characterBook = characterBoundWorldBookName();
+    if (characterBook) names.push(characterBook);
     const chatBook = text(ctx.chatMetadata?.[CHAT_WORLD_INFO_KEY]);
     if (chatBook) names.push(chatBook);
     return unique(names);
+}
+
+function characterBoundWorldBookName() {
+    refreshContext();
+    const character = hasCurrentCharacter() ? ctx.characters?.[ctx.characterId] : null;
+    return text(character?.data?.extensions?.world);
 }
 
 function getLinkedReferenceWorldBookName() {
@@ -3002,11 +3010,13 @@ function getWorldBookTarget() {
 }
 
 function storyWorldBookName() {
+    const characterBook = characterBoundWorldBookName();
     const existingChatBook = text(ctx.chatMetadata?.[CHAT_WORLD_INFO_KEY]);
-    // The story console must write into the book currently attached to this
-    // chat. The character card is only a generation reference and must never
-    // become the NPC import target. Keep a previously saved target only when
-    // it is still the same existing book; otherwise use the live chat binding.
+    // A character card's primary world is the authoritative target for NPCs.
+    // Chat metadata may still point at an old parallel book created by an
+    // earlier version of the extension, so it must not override the card.
+    // Blank-card chats have no primary world and fall back to their chat book.
+    if (characterBook) return characterBook;
     if (existingChatBook) return existingChatBook;
     const canonicalName = '剧情大纲工作台';
     if (getAvailableWorldBookNames().includes(canonicalName)) return canonicalName;
@@ -3058,7 +3068,7 @@ async function acceptNpcs() {
         }
         await saveWorldInfo(bookName, data, true);
         await updateWorldInfoList?.();
-        if (ctx.chatMetadata) {
+        if (ctx.chatMetadata && !characterBoundWorldBookName()) {
             // Preserve the current chat binding. If the console is operating
             // in its standalone mode, use the conventional workbench name.
             if (!text(ctx.chatMetadata[CHAT_WORLD_INFO_KEY])) {
@@ -3223,9 +3233,12 @@ function storyPrompt() {
     const remaining = Math.max(0, min - state.userTurnCount);
     const activeNpcs = state.npcs.filter(npc => npc.enabled !== false);
     const pacingRule = remaining > 0
-        ? `距离最低交互要求还差 ${remaining} 个 user 楼层。在达到 ${min} 个 user 楼层前，严禁进入最终高潮、解决核心矛盾、完成终极目标、让主要关系定局或输出结局；本次只能推进过程事件并留下明确的后续行动空间。`
-        : '已达到最低交互楼层，可以依据大纲和当前节奏进入高潮或结局，但不要无故跳过必要情节。';
-    return `${basePrompt()}\n当前故事 ID：${ensureStoryId()}\n当前 user 唯一姓名：${currentUserName() || '尚未确定'}\n已接受大纲（版本${state.outlineVersion}）：${state.outline}\n当前故事启用的 NPC：${JSON.stringify(activeNpcs)}\n关闭的 NPC 不得出场、不得作为关系对象、不得被世界书上下文重新启用。\n已完成剧情快照（绝不能重写）：${state.completedStorySnapshot || '暂无'}\n当前剧情楼层：${state.currentTurn}；user已输入楼层：${state.userTurnCount}；本篇最低 user 交互楼层：${min}\n楼层硬约束：${pacingRule}\n配置中的特别想看的情节、禁区和补充要求：${text(state.config.detail) || '暂无'}\n特别要求是本次剧情的高优先级约束；其中明确指定的中途、高潮、结尾或场景，必须在未完成大纲范围内优先落实，已完成部分除外。\n硬规则：严格按照接受的大纲和所有配置关键词推进；不要擅自改变 user 人设；不要让 NPC OOC；不要提前结局；已完成剧情只当作历史；新的剧情必须连接最近聊天内容。user 本楼明确做出的行动、选择、拒绝、目标和新要求优先于未发生的大纲情节；不要无视 user 输入，也不要强行把 user 拉回原轨。普通偏差要自然吸收，并把未完成的大纲事件改写成能由当前行动导向的版本。若 user 的行动与未完成大纲的关键事件、关系走向或结局方向发生实质冲突，先承接 user 已经做出的事实，不要在本楼强行纠正；将其作为新的分支，并提示 user 可用“修改后续大纲”确认后续路线。已完成剧情绝不能改写。如果 user 本楼只输入“继续剧情”或等价推进指令，不要把这几个字当作剧情事实，直接按照接受版大纲、最近聊天和当前节奏推进下一楼。只输出本次剧情正文，不要大纲、总结、设定说明。`;
+        ? `距离最低交互要求还差 ${remaining} 个 user 楼层。在达到 ${min} 个 user 楼层前，严禁进入最终高潮、解决核心矛盾、完成终极目标、让主要关系定局或输出结局；本次只能推进过程事件并留下明确的后续行动空间。禁止出现“结局后”“后日谈”“多年后”“婚后日常”或故事已经结束的叙述。`
+        : '已达到最低交互楼层，可以依据大纲和当前节奏进入高潮或结局，但不要无故跳过必要情节；只有真正完成大纲中的结局事件后，才允许写结局后的内容。';
+    const contextRule = state.currentTurn > 0
+        ? `酒馆会自动提供当前聊天的最近消息；请以最近一条实际 user 输入和上一条剧情为准，自动判断大纲已经推进到哪一段。当前工作台计数仅作辅助：剧情楼 ${state.currentTurn}，user 交互楼 ${state.userTurnCount}。不要把下面的完整大纲当成已经发生过的剧情。`
+        : '请从当前聊天最后一条实际内容承接开端；不要因为大纲包含高潮和结局就直接跳到故事末尾。';
+    return `${basePrompt()}\n当前故事 ID：${ensureStoryId()}\n当前 user 唯一姓名：${currentUserName() || '尚未确定'}\n已接受大纲（版本${state.outlineVersion}，仅为未来路线规划，不代表已经完成）：${state.outline}\n当前故事启用的 NPC：${JSON.stringify(activeNpcs)}\n关闭的 NPC 不得出场、不得作为关系对象、不得被世界书上下文重新启用。\n${contextRule}\n本地已完成剧情记录长度：${state.completedStorySnapshot ? state.completedStorySnapshot.length : 0} 字；该记录只用于工作台去重和进度保存，不在本提示中重复发送，实际剧情请从酒馆当前聊天上下文读取。\n本篇最低 user 交互楼层：${min}\n楼层硬约束：${pacingRule}\n配置中的特别想看的情节、禁区和补充要求：${text(state.config.detail) || '暂无'}\n特别要求是本次剧情的高优先级约束；其中明确指定的中途、高潮、结尾或场景，必须在未完成大纲范围内优先落实，已完成部分除外。\n硬规则：严格按照接受的大纲和所有配置关键词推进；不要擅自改变 user 人设；不要让 NPC OOC；不要提前结局；已完成剧情只当作历史；新的剧情必须连接最近聊天内容。user 本楼明确做出的行动、选择、拒绝、目标和新要求优先于未发生的大纲情节；不要无视 user 输入，也不要强行把 user 拉回原轨。普通偏差要自然吸收，并把未完成的大纲事件改写成能由当前行动导向的版本。若 user 的行动与未完成大纲的关键事件、关系走向或结局方向发生实质冲突，先承接 user 已经做出的事实，不要在本楼强行纠正；将其作为新的分支，并提示 user 可用“修改后续大纲”确认后续路线。已完成剧情绝不能改写。如果 user 本楼只输入“继续剧情”或等价推进指令，不要把这几个字当作剧情事实，直接按照接受版大纲、最近聊天和当前节奏推进下一楼。只输出本次剧情正文，不要大纲、总结、设定说明。`;
 }
 
 function updateContinuityPrompt() {
