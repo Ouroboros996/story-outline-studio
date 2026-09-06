@@ -2,7 +2,7 @@ const EXTENSION_ID = 'story-outline-studio';
 const METADATA_KEY = 'storyOutlineStudio';
 const CHAT_WORLD_INFO_KEY = 'world_info';
 const PROMPT_KEY = 'story-outline-studio-continuity';
-const VERSION = 16;
+const VERSION = 17;
 
 // Load core modules after the extension script itself has been evaluated. This
 // avoids the script.js <-> st-context.js cycle preventing the public API from
@@ -623,6 +623,18 @@ function defaultState() {
             error: '',
             at: 0,
         },
+        continuation: {
+            kind: '',
+            raw: '',
+            prompt: '',
+            schema: null,
+            responseLength: 0,
+            allowText: false,
+            patchTag: '',
+            mode: 'new',
+            feedback: '',
+            at: 0,
+        },
     };
 }
 
@@ -662,6 +674,20 @@ function getState() {
             at: Number(next.lastGeneration.at) || 0,
         }
         : defaultState().lastGeneration;
+    next.continuation = next.continuation && typeof next.continuation === 'object'
+        ? {
+            kind: text(next.continuation.kind),
+            raw: text(next.continuation.raw),
+            prompt: text(next.continuation.prompt),
+            schema: next.continuation.schema && typeof next.continuation.schema === 'object' ? clone(next.continuation.schema) : null,
+            responseLength: Number(next.continuation.responseLength) || 0,
+            allowText: Boolean(next.continuation.allowText),
+            patchTag: text(next.continuation.patchTag),
+            mode: text(next.continuation.mode) || 'new',
+            feedback: text(next.continuation.feedback),
+            at: Number(next.continuation.at) || 0,
+        }
+        : defaultState().continuation;
     // Older versions could append the same partial response several times.
     // Collapse those drafts when loading metadata so one failed request cannot
     // produce a page full of identical "unnamed" validation warnings.
@@ -1355,7 +1381,10 @@ function generationDiagnosticsMarkup() {
     const renderBlock = (label, value, className = '') => value
         ? `<div class="sos-diagnostic-block ${className}"><strong>${label}</strong><pre>${escapeHtml(value)}</pre></div>`
         : '';
-    return `<details class="sos-diagnostics" ${snapshot.error ? 'open' : ''}><summary><span>最近一次响应摘要</span><small>${escapeHtml(labels[snapshot.kind] || snapshot.kind || '暂无')} · ${escapeHtml(generatedAt)}</small></summary><div class="sos-diagnostics-body"><small>这里只显示诊断预览；“诊断预览省略”不代表插件解析时丢弃了原始正文。</small>${renderBlock('错误', snapshot.error, 'error')}${renderBlock('上游原始响应', snapshot.rawPreview)}${renderBlock('整理请求响应', snapshot.repairedPreview)}</div></details>`;
+    const continuation = state.continuation?.kind
+        ? `<div class="sos-continuation"><strong>${escapeHtml(labels[state.continuation.kind] || '结构化内容')}输出未完成</strong><button type="button" class="sos-secondary" data-action="continue-structured"><i class="fa-solid fa-forward"></i> 继续生成并导入</button></div>`
+        : '';
+    return `${continuation}<details class="sos-diagnostics" ${snapshot.error ? 'open' : ''}><summary><span>最近一次响应摘要</span><small>${escapeHtml(labels[snapshot.kind] || snapshot.kind || '暂无')} · ${escapeHtml(generatedAt)}</small></summary><div class="sos-diagnostics-body"><small>这里只显示诊断预览；“诊断预览省略”不代表插件解析时丢弃了原始正文。</small>${renderBlock('错误', snapshot.error, 'error')}${renderBlock('上游原始响应', snapshot.rawPreview)}${renderBlock('整理请求响应', snapshot.repairedPreview)}</div></details>`;
 }
 
 function personaMarkup() {
@@ -1634,6 +1663,7 @@ async function handleAction(action, button) {
         return;
     }
     setCustomValues();
+    if (action === 'continue-structured') return continueStructuredGeneration();
     if (action === 'generate-outline') return startOutline();
     if (action === 'generate-persona') return generatePersona();
     if (action === 'reroll-persona') return generatePersona();
@@ -1715,36 +1745,8 @@ function getCurrentCharacterBook() {
     try { return normalizeWorldBookData(book); } catch { return null; }
 }
 
-async function loadCharacterOwnedWorldBook() {
-    const embedded = getCurrentCharacterBook();
-    if (embedded) return cloneWorldBookData(embedded);
-
-    const data = { entries: {} };
-    const linkedNames = unique([
-        getWorldBookTarget(),
-        ...getCharacterExtraWorldBookNames(),
-    ]);
-
-    for (const name of linkedNames) {
-        if (!name) continue;
-        const linked = cloneWorldBookData(await loadWorldInfo(name));
-        for (const entry of Object.values(linked.entries || {})) {
-            const baseUid = String(entry.uid ?? Object.keys(data.entries).length);
-            let uid = baseUid;
-            let suffix = 1;
-            while (data.entries[uid]) uid = `${baseUid}-${suffix++}`;
-            data.entries[uid] = { ...clone(entry), uid };
-        }
-    }
-
-    return data;
-}
-
 function linkedReferenceWorldBookNames() {
     const names = [];
-    const characterBook = getWorldBookTarget();
-    if (characterBook) names.push(characterBook);
-    names.push(...getCharacterExtraWorldBookNames());
     const chatBook = text(ctx.chatMetadata?.[CHAT_WORLD_INFO_KEY]);
     if (chatBook) names.push(chatBook);
     return unique(names);
@@ -1860,23 +1862,6 @@ function referenceBooksText() {
             if (entries.length) books.push(`<linked_worldbook name="${escapeHtml(bookName)}">${entries.join('')}\n</linked_worldbook>`);
         }
         if (used >= maxTotal) break;
-    }
-    const characterBook = getCurrentCharacterBook();
-    if (characterBook && used < maxTotal) {
-        const entries = [];
-        for (const entry of Object.values(characterBook.entries)) {
-            if (entry?.disable === true || entry?.enabled === false || entry?.extensions?.disabled === true) continue;
-            if (isStoryNpcEntry(entry)) continue;
-            const remaining = maxTotal - used;
-            if (remaining <= 0) break;
-            const content = limitPromptText(entry?.content, Math.max(120, Math.min(1800, remaining - 80)));
-            if (!content) continue;
-            const keys = unique([...asList(entry?.key), ...asList(entry?.keysecondary)]);
-            const part = `\n[${keys.join('、') || '无关键词'}] ${content}`;
-            entries.push(part);
-            used += part.length;
-        }
-        if (entries.length) books.push(`<character_card_worldbook>${entries.join('')}\n</character_card_worldbook>`);
     }
     return books.join('\n');
 }
@@ -2242,6 +2227,120 @@ function hasGeneratedShape(parsed, schema) {
     return true;
 }
 
+function countTag(raw, tag, closing = false) {
+    const pattern = closing ? new RegExp(`<\\/${tag}\\s*>`, 'giu') : new RegExp(`<${tag}(?:\\s|>)`, 'giu');
+    return [...text(raw).matchAll(pattern)].length;
+}
+
+function hasUnclosedStructuredTags(raw, schema) {
+    const source = text(raw);
+    if (schema?.properties?.npcs) {
+        return countTag(source, 'npcs') > countTag(source, 'npcs', true)
+            || countTag(source, 'npc') > countTag(source, 'npc', true);
+    }
+    if (schema?.properties?.name && !schema?.properties?.opening) {
+        return countTag(source, 'persona') > countTag(source, 'persona', true);
+    }
+    if (schema?.properties?.opening) return countTag(source, 'outline') > countTag(source, 'outline', true);
+    return false;
+}
+
+function hasUnclosedJson(raw) {
+    const source = stripReasoningBlocks(raw).trim();
+    // Curly braces in a prose field are not evidence of a cut-off JSON
+    // response. Only inspect text that starts like a JSON object/array, or a
+    // tagged block whose body starts like JSON.
+    if (!/^(?:```(?:json)?\s*)?[\[{]/iu.test(source)
+        && !/<(?:persona|npcs?|outline)\b[^>]*>\s*[\[{]/iu.test(source)) return false;
+    const jsonStart = source.search(/[\[{]/u);
+    if (jsonStart < 0) return false;
+    const candidate = source.slice(jsonStart).replace(/```(?:json)?/giu, '');
+    let quote = false;
+    let escaped = false;
+    const stack = [];
+    for (const character of candidate) {
+        if (escaped) { escaped = false; continue; }
+        if (character === '\\') { escaped = true; continue; }
+        if (character === '"') { quote = !quote; continue; }
+        if (quote) continue;
+        if (character === '{' || character === '[') stack.push(character);
+        if (character === '}' || character === ']') {
+            const expected = character === '}' ? '{' : '[';
+            if (stack.at(-1) === expected) stack.pop();
+        }
+    }
+    return quote || stack.length > 0;
+}
+
+function isLikelyTruncatedResponse(raw, parsed, schema) {
+    const source = stripReasoningBlocks(raw);
+    if (!source.trim()) return false;
+    if (/内容已截断|输出被截断|继续生成|truncated|finish_reason\s*[=:]\s*["']?length/i.test(source)) return true;
+    if (hasUnclosedStructuredTags(source, schema) || hasUnclosedJson(source)) return true;
+    // A parser may represent a tagged outline as one text field rather than
+    // five object fields. If the normal shape validator already accepts it,
+    // it is complete even when the response is not JSON.
+    if (parsed && hasGeneratedShape(parsed, schema)) return false;
+
+    const properties = schema?.properties || {};
+    if (properties.opening) {
+        const outline = parsed?.outline && typeof parsed.outline === 'object' ? parsed.outline : parsed || {};
+        return ['opening', 'development', 'turningPoint', 'climax', 'ending'].some(key => !text(outline[key] || outline[{ opening: '开端', development: '发展', turningPoint: '转折', climax: '高潮', ending: '结局' }[key]]));
+    }
+    if (properties.name && !properties.opening) {
+        const persona = parsed?.persona || parsed || {};
+        const required = ['name', 'gender', 'age', 'appearance', 'personality', 'identity', 'past', 'habits', 'boundaries'];
+        return Boolean(persona.name || persona['姓名']) && required.some(key => !text(persona[key] || persona[{ name: '姓名', gender: '性别', age: '年龄', appearance: '外貌', personality: '性格', identity: '身份背景', past: '过去经历', habits: '习惯', boundaries: '禁区' }[key]]));
+    }
+    if (properties.npcs) {
+        const npcs = Array.isArray(parsed?.npcs) ? parsed.npcs : [];
+        const required = ['name', 'aliases', 'gender', 'age', 'height', 'appearance', 'personality', 'identity', 'past', 'relationship', 'attitude', 'quotes', 'nsfw', 'body'];
+        return npcs.length > 0 && npcs.some(npc => required.some(key => Array.isArray(npc?.[key]) ? !npc[key].length : !text(npc?.[key])));
+    }
+    return false;
+}
+
+async function continueStructuredGeneration() {
+    const continuation = state?.continuation;
+    if (!continuation?.kind || !continuation.raw || !continuation.schema) {
+        return toastr.warning('当前没有可继续的截断生成。');
+    }
+
+    const kind = continuation.kind;
+    const mode = continuation.mode || 'new';
+    const feedback = continuation.feedback || '';
+    // Keep the original mode and feedback so a cut-off revision resumes the
+    // same complete-output contract instead of becoming an unrelated reroll.
+    if (kind === 'persona') return generatePersona(feedback, mode, continuation);
+    if (kind === 'outline') return generateOutline(feedback, mode, continuation);
+    if (kind === 'npc') return generateNpcs(feedback, mode, continuation);
+    clearContinuation();
+    return toastr.warning('无法识别当前截断内容类型，请重新生成。');
+}
+
+function saveContinuation(kind, raw, prompt, schema, responseLength, options = {}) {
+    if (!state) return;
+    state.continuation = {
+        kind,
+        raw: text(raw),
+        prompt: text(prompt),
+        schema: clone(schema),
+        responseLength: Number(responseLength) || 1200,
+        allowText: Boolean(options.allowText),
+        patchTag: text(options.patchTag),
+        mode: text(options.continuationMeta?.mode) || 'new',
+        feedback: text(options.continuationMeta?.feedback),
+        at: Date.now(),
+    };
+    saveState();
+}
+
+function clearContinuation(kind = '') {
+    if (!state?.continuation?.kind || (kind && state.continuation.kind !== kind)) return;
+    state.continuation = defaultState().continuation;
+    saveState();
+}
+
 function parseGeneratedPayload(raw, allowText = false, schema = null) {
     const source = stripReasoningBlocks(raw);
     if (!source) return null;
@@ -2368,7 +2467,7 @@ function getGenerationSchema(schema, patchTag) {
     return relaxed;
 }
 
-async function generateJson(prompt, schema, responseLength = 1200, { allowText = false, patchTag = '' } = {}) {
+async function generateJson(prompt, schema, responseLength = 1200, { allowText = false, patchTag = '', continuationRaw = '', continuationMeta = null } = {}) {
     // Read the assistant body back from SillyTavern and parse it locally. The
     // core structured-output path may turn a valid tag/plain-text response
     // into an empty object before an extension gets to inspect it.
@@ -2378,9 +2477,12 @@ async function generateJson(prompt, schema, responseLength = 1200, { allowText =
         : `请优先使用下面的纯文本标签协议返回完整结果：${fullTag}`;
     const generationSchema = getGenerationSchema(schema, patchTag);
     const schemaInstruction = `\n字段参考（不要输出 schema）：${JSON.stringify(generationSchema)}\n${patchProtocol}不要输出解释、Markdown 或思维链。若你能稳定返回 JSON，也可以返回单个 JSON 对象。`;
+    const continuationInstruction = continuationRaw
+        ? `\n这是上一次同一结构化响应的续写请求。下面是已经收到的完整前文，请从前文最后一个字符之后继续输出，禁止重复前文、禁止重新输出开头标签、禁止输出解释或 Markdown；只输出缺失的后半段，直到完整闭合所有标签和字段。\n<already_received>\n${continuationRaw}\n</already_received>\n`
+        : '';
     const request = async extraPrompt => {
         const params = {
-            quietPrompt: `${prompt}${schemaInstruction}${extraPrompt || ''}\n涉及成人内容时，参与者必须是成年人。`,
+            quietPrompt: `${prompt}${schemaInstruction}${continuationInstruction}${extraPrompt || ''}\n涉及成人内容时，参与者必须是成年人。`,
             responseLength,
             skipWIAN: true,
         };
@@ -2392,6 +2494,7 @@ async function generateJson(prompt, schema, responseLength = 1200, { allowText =
     };
     const requestEpoch = generationEpoch;
     const kind = generationKind(schema);
+    if (!continuationRaw) clearContinuation(kind);
     let result;
     structuredGenerationInProgress = true;
     try {
@@ -2415,14 +2518,22 @@ async function generateJson(prompt, schema, responseLength = 1200, { allowText =
         saveGenerationSnapshot(kind, { error: wrapped.message });
         throw wrapped;
     }
-    let raw = extractAssistantContent(result).trim() || extractGeneratedText(result).trim();
+    const continuationText = extractAssistantContent(result).trim() || extractGeneratedText(result).trim();
+    let raw = continuationRaw ? `${continuationRaw}${continuationText}` : continuationText;
     if (isUpstreamErrorText(raw)) {
         const wrapped = wrapGenerationError(new Error(raw));
         saveGenerationSnapshot(kind, { raw, error: wrapped.message });
         throw wrapped;
     }
     let parsed = parseGeneratedPayload(raw, allowText, schema);
+    const truncated = isLikelyTruncatedResponse(raw, parsed, schema);
+    if (truncated) {
+        saveContinuation(kind, raw, prompt, schema, responseLength, { allowText, patchTag, continuationMeta });
+        saveGenerationSnapshot(kind, { raw, error: 'AI 输出被截断，等待继续生成' });
+        throw new Error('AI 输出似乎被截断，已保留前文。请点击“继续生成”完成并导入。');
+    }
     if (parsed && hasGeneratedShape(parsed, schema)) {
+        clearContinuation(kind);
         saveGenerationSnapshot(kind, { raw });
         return parsed;
     }
@@ -2436,7 +2547,7 @@ async function generateJson(prompt, schema, responseLength = 1200, { allowText =
     throw new Error(`AI 返回内容无法识别为 JSON、标签或字段文本，请重试。响应摘要：${preview}`);
 }
 
-async function generateJsonForeground(prompt, schema, { allowText = false, patchTag = '' } = {}) {
+async function generateJsonForeground(prompt, schema, { allowText = false, patchTag = '', continuationRaw = '', continuationMeta = null } = {}) {
     // SillyTavern 1.17 deliberately excludes quiet requests from its streaming
     // processor. A foreground request is the only honest way to expose native
     // streaming, so its structured draft is intentionally retained in chat.
@@ -2447,7 +2558,11 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
         : `请优先使用下面的纯文本标签协议返回完整结果：${fullTag}`;
     const generationSchema = getGenerationSchema(schema, patchTag);
     const schemaInstruction = `\n字段参考（不要输出 schema）：${JSON.stringify(generationSchema)}\n${patchProtocol}不要输出解释、Markdown 或思维链。若你能稳定返回 JSON，也可以返回单个 JSON 对象。`;
+    const continuationInstruction = continuationRaw
+        ? `\n这是上一次同一结构化响应的续写请求。已有前文如下，请从最后一个字符之后继续，只输出缺失后半段，不要重复前文或重新输出开头标签，直到完整闭合结构：\n<already_received>\n${continuationRaw}\n</already_received>\n`
+        : '';
     const kind = generationKind(schema);
+    if (!continuationRaw) clearContinuation(kind);
     const beforeLength = ctx.chat?.length || 0;
     let generated;
     let temporaryUserMessage = null;
@@ -2480,7 +2595,7 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
             ctx.chat.push(temporaryUserMessage);
         }
         const result = await ctx.generate('normal', {
-            quiet_prompt: `${prompt}${schemaInstruction}\n涉及成人内容时，参与者必须是成年人。`,
+            quiet_prompt: `${prompt}${schemaInstruction}${continuationInstruction}\n涉及成人内容时，参与者必须是成年人。`,
             quietToLoud: true,
             skipWIAN: true,
             force_name2: true,
@@ -2523,7 +2638,8 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
         updateContinuityPrompt();
     }
 
-    const raw = text(generated?.mes);
+    const continuationText = text(generated?.mes);
+    const raw = continuationRaw ? `${continuationRaw}${continuationText}` : continuationText;
     if (!generated || !raw) {
         const error = new Error('酒馆请求已完成，但没有写入结构化草稿消息。请检查 API 响应和酒馆控制台。');
         saveGenerationSnapshot(kind, { error: error.message });
@@ -2540,6 +2656,12 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
         throw wrapped;
     }
     const parsed = parseGeneratedPayload(raw, allowText, schema);
+    const truncated = isLikelyTruncatedResponse(raw, parsed, schema);
+    if (truncated) {
+        saveContinuation(kind, raw, prompt, schema, 12000, { allowText, patchTag, continuationMeta });
+        saveGenerationSnapshot(kind, { raw, error: 'AI 输出被截断，等待继续生成' });
+        throw new Error('AI 输出似乎被截断，已保留前文。请点击“继续生成”完成并导入。');
+    }
     const generatedInChat = (ctx.chat || []).includes(generated);
     if (generatedInChat) {
         generated.extra = {
@@ -2549,6 +2671,7 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
         await ctx.saveChat?.();
     }
     if (parsed && hasGeneratedShape(parsed, schema)) {
+        clearContinuation(kind);
         saveGenerationSnapshot(kind, { raw });
         return parsed;
     }
@@ -2608,7 +2731,7 @@ async function startOutline() {
     await generateOutline();
 }
 
-async function generatePersona(feedback = '', mode = 'new') {
+async function generatePersona(feedback = '', mode = 'new', continuation = null) {
     await withGenerating(async () => {
         await ensureReferenceWorldBookLoaded();
         const editedPersona = text(document.getElementById('sos-persona')?.value);
@@ -2633,7 +2756,7 @@ async function generatePersona(feedback = '', mode = 'new') {
             ? `\n这是全新生成，不是对旧人设润色。随机生成标识：${generationNonce('persona')}。请更换姓名、成长经历、职业细节和辨识度特征，不要复用当前草稿。`
             : '';
         const prompt = `${basePrompt()}\n请生成 user 的故事人设。必须返回完整字段：name、gender、age、appearance、personality、identity、past、habits、boundaries。设定要和配置的背景、性别方向、剧情标签兼容；如果故事包含成人内容，年龄字段必须明确为成年人。${previous}${revision}${novelty}\n保留基线中未被明确要求修改的内容；不要返回空字段。若无法返回 JSON，请输出 <persona> 标签，标签内每行一个“字段：内容”。`;
-        const result = await generateJson(prompt, { type: 'object', properties: { name: { type: 'string' }, gender: { type: 'string' }, age: { type: 'string' }, appearance: { type: 'string' }, personality: { type: 'string' }, identity: { type: 'string' }, past: { type: 'string' }, habits: { type: 'string' }, boundaries: { type: 'string' } }, required: ['name', 'gender', 'age', 'appearance', 'personality', 'identity', 'past', 'habits', 'boundaries'] }, 1800, { allowText: true });
+        const result = await generateJson(prompt, { type: 'object', properties: { name: { type: 'string' }, gender: { type: 'string' }, age: { type: 'string' }, appearance: { type: 'string' }, personality: { type: 'string' }, identity: { type: 'string' }, past: { type: 'string' }, habits: { type: 'string' }, boundaries: { type: 'string' } }, required: ['name', 'gender', 'age', 'appearance', 'personality', 'identity', 'past', 'habits', 'boundaries'] }, 1800, { allowText: true, continuationRaw: continuation?.raw || '', continuationMeta: { mode, feedback } });
         const nextPersona = mode === 'revise'
             ? mergePersonaData(
                 state.userPersonaData || state.userPersona,
@@ -2699,7 +2822,7 @@ function outlineSchema() {
     };
 }
 
-async function generateOutline(feedback = '', mode = 'new') {
+async function generateOutline(feedback = '', mode = 'new', continuation = null) {
     await withGenerating(async () => {
         await ensureReferenceWorldBookLoaded();
         ensureStoryId();
@@ -2735,7 +2858,7 @@ async function generateOutline(feedback = '', mode = 'new') {
             prompt,
             outlineSchema(),
             outlineResponseLength,
-            { allowText: true },
+            { allowText: true, continuationRaw: continuation?.raw || '', continuationMeta: { mode, feedback } },
         );
         const outlineData = mode === 'revise'
             ? mergeOutlineData(
@@ -2799,7 +2922,7 @@ async function acceptOutline() {
     await generateNpcs();
 }
 
-async function generateNpcs(feedback = '', mode = 'new') {
+async function generateNpcs(feedback = '', mode = 'new', continuation = null) {
     await withGenerating(async () => {
         await ensureReferenceWorldBookLoaded();
         ensureStoryId();
@@ -2828,7 +2951,7 @@ async function generateNpcs(feedback = '', mode = 'new') {
             prompt,
             npcSchema,
             state.config.relationshipMode === 'NP' ? 16000 : 10000,
-            { allowText: true },
+            { allowText: true, continuationRaw: continuation?.raw || '', continuationMeta: { mode, feedback } },
         );
         let nextNpcs = mode === 'revise'
             ? mergeNpcDrafts(
@@ -2880,13 +3003,14 @@ function getWorldBookTarget() {
 
 function storyWorldBookName() {
     const existingChatBook = text(ctx.chatMetadata?.[CHAT_WORLD_INFO_KEY]);
-    if (state.worldBookName && state.worldBookName !== getWorldBookTarget() && state.worldBookName !== existingChatBook) {
-        return state.worldBookName;
-    }
-    const chatId = text(ctx.getCurrentChatId?.());
-    const characterName = currentCharacterContext().name;
-    const suffix = chatId || ensureStoryId();
-    return safeWorldBookName(`剧情工作台-${characterName}-${suffix}`) || `剧情工作台-${ensureStoryId()}`;
+    // The story console must write into the book currently attached to this
+    // chat. The character card is only a generation reference and must never
+    // become the NPC import target. Keep a previously saved target only when
+    // it is still the same existing book; otherwise use the live chat binding.
+    if (existingChatBook) return existingChatBook;
+    const canonicalName = '剧情大纲工作台';
+    if (getAvailableWorldBookNames().includes(canonicalName)) return canonicalName;
+    return canonicalName;
 }
 
 function npcToWorldEntry(npc) {
@@ -2898,6 +3022,12 @@ function npcToWorldEntry(npc) {
     return { keys, content, comment: name, enabled: normalized.enabled !== false };
 }
 
+function isCurrentStoryNpcEntry(entry, storyId) {
+    if (!isStoryNpcEntry(entry)) return false;
+    const content = text(entry?.content);
+    return content.includes(`故事 ID：${storyId}`) || content.includes(`故事 ID: ${storyId}`);
+}
+
 async function acceptNpcs() {
     if (!state.npcs.length) return toastr.warning('没有可写入的 NPC。');
     state.npcs = state.npcs.map(normalizeNpc);
@@ -2905,17 +3035,15 @@ async function acceptNpcs() {
     if (invalid) return toastr.warning(`${invalid} 请先修改。`);
     await withGenerating(async () => {
         const bookName = storyWorldBookName();
-        // Start each story book from the current character's own lorebook.
-        // The chat-attached book may belong to an older story window and must
-        // never be used as the NPC import source.
-        const data = await loadCharacterOwnedWorldBook();
+        const data = cloneWorldBookData(await loadWorldInfo(bookName));
         if (!data.entries || typeof data.entries !== 'object') data.entries = {};
+        const storyId = ensureStoryId();
         for (const [entryId, entry] of Object.entries(data.entries)) {
-            if (isStoryNpcEntry(entry)) delete data.entries[entryId];
+            if (isCurrentStoryNpcEntry(entry, storyId)) delete data.entries[entryId];
         }
         for (const npc of state.npcs) {
             const normalized = npcToWorldEntry(npc);
-            const existing = Object.values(data.entries).find(entry => isStoryNpcEntry(entry) && text(entry?.comment) === normalized.comment);
+            const existing = Object.values(data.entries).find(entry => isCurrentStoryNpcEntry(entry, storyId) && text(entry?.comment) === normalized.comment);
             const entry = existing || createWorldInfoEntry(bookName, data);
             if (!entry) continue;
             entry.key = normalized.keys;
@@ -2931,8 +3059,12 @@ async function acceptNpcs() {
         await saveWorldInfo(bookName, data, true);
         await updateWorldInfoList?.();
         if (ctx.chatMetadata) {
-            ctx.chatMetadata[CHAT_WORLD_INFO_KEY] = bookName;
-            await ctx.saveMetadata?.();
+            // Preserve the current chat binding. If the console is operating
+            // in its standalone mode, use the conventional workbench name.
+            if (!text(ctx.chatMetadata[CHAT_WORLD_INFO_KEY])) {
+                ctx.chatMetadata[CHAT_WORLD_INFO_KEY] = bookName;
+                await ctx.saveMetadata?.();
+            }
         }
         state.worldBookName = bookName;
         state.npcsAccepted = true;

@@ -44,6 +44,9 @@
 .sos-diagnostics summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; cursor: pointer; color: var(--sos-ink); font-size: 13px; font-weight: 700; }
 .sos-diagnostics summary small { color: var(--sos-muted); font-size: 11px; font-weight: 400; text-align: right; }
 .sos-diagnostics-body { display: grid; gap: 10px; padding: 0 13px 13px; }
+.sos-continuation { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 18px; padding: 12px 13px; border: 1px solid var(--sos-accent); background: #171b22; color: var(--sos-ink); }
+.sos-continuation strong { color: var(--sos-accent); font-size: 13px; }
+.sos-continuation button { flex: 0 0 auto; min-height: 40px; }
 .sos-diagnostic-block { min-width: 0; }
 .sos-diagnostic-block strong { display: block; margin-bottom: 5px; color: var(--sos-muted); font-size: 11px; }
 .sos-diagnostic-block.error strong { color: var(--sos-accent); }
