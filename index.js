@@ -93,6 +93,7 @@ let state = null;
 let activeStage = 'config';
 let panel = null;
 let generating = false;
+let generatingLabel = '正在生成中...';
 let generationEpoch = 0;
 let continuationGenerationInProgress = false;
 let structuredGenerationInProgress = false;
@@ -1299,6 +1300,7 @@ function normalizeOutlineData(value, raw = '') {
     const legacy = stripReasoningBlocks(text(source.outline ?? source['大纲'] ?? source['剧情大纲'] ?? source.content ?? raw))
         .replace(/^\s*\[\s*(开端|发展|转折|高潮|结局)\s*\]\s*$/gim, '$1：')
         .replace(/^\s*(?:#{1,6}\s*)?(开端|发展|转折|高潮|结局)\s*$/gim, '$1：');
+    const sectionLabels = ['开端', '发展', '转折', '高潮', '结局', '主要角色名', '主要 NPC 功能', 'NSFW 节点', '硬性规则'];
     const sectionFromLegacy = (label, nextLabels) => {
         const pattern = new RegExp(`${label}[：:]\\s*([\\s\\S]*?)(?=\\n\\s*(?:${nextLabels.join('|')})[：:]|$)`, 'i');
         return legacy.match(pattern)?.[1]?.trim() || '';
@@ -1306,7 +1308,11 @@ function normalizeOutlineData(value, raw = '') {
     const tagged = key => extractTaggedBlocks(raw, key)[0] || '';
     const get = (key, label, ...aliases) => {
         const direct = source[key] ?? aliases.map(alias => source[alias]).find(Boolean) ?? tagged(key);
-        return text(direct || sectionFromLegacy(label, ['开端', '发展', '转折', '高潮', '结局'].filter(item => item !== label)));
+        return text(direct || sectionFromLegacy(label, sectionLabels.filter(item => item !== label)));
+    };
+    const getList = (key, labels, tag) => {
+        const direct = source[key] ?? labels.map(label => source[label]).find(Boolean) ?? tagged(tag);
+        return asList(direct || labels.map(label => sectionFromLegacy(label, sectionLabels.filter(item => item !== label))).find(Boolean) || '');
     };
     return {
         opening: get('opening', '开端', '开场', 'opening', '开端'),
@@ -1315,12 +1321,12 @@ function normalizeOutlineData(value, raw = '') {
         climax: get('climax', '高潮', 'climax', '高潮'),
         ending: get('ending', '结局', 'end', 'ending', '结局'),
         characterNames: unique([
-            ...asList(source.characterNames ?? source['主要角色名'] ?? source['角色名'] ?? tagged('character_names')),
+            ...getList('characterNames', ['主要角色名', '角色名'], 'character_names'),
             ...outlineCharacterNamesFromText(raw),
         ]),
-        npcFunctions: asList(source.npcFunctions ?? source['主要 NPC 功能'] ?? source['主要NPC功能'] ?? tagged('npc_functions')),
-        nsfwNodes: asList(source.nsfwNodes ?? source['NSFW 节点'] ?? source['NSFW节点'] ?? tagged('nsfw_nodes')),
-        hardRules: asList(source.hardRules ?? source['硬性规则'] ?? tagged('hard_rules')),
+        npcFunctions: getList('npcFunctions', ['主要 NPC 功能', '主要NPC功能'], 'npc_functions'),
+        nsfwNodes: getList('nsfwNodes', ['NSFW 节点', 'NSFW节点'], 'nsfw_nodes'),
+        hardRules: getList('hardRules', ['硬性规则'], 'hard_rules'),
     };
 }
 
@@ -1338,6 +1344,11 @@ function mergeOutlineData(previous, next) {
         merged[key] = newOutline[key].length ? newOutline[key] : oldOutline[key];
     }
     return merged;
+}
+
+function hasCompleteOutline(data) {
+    const normalized = normalizeOutlineData(data);
+    return ['opening', 'development', 'turningPoint', 'climax', 'ending'].every(field => Boolean(normalized[field]));
 }
 
 function validatePersona(persona) {
@@ -1411,9 +1422,41 @@ function outlineMarkup() {
     const hasOutline = text(state.outline);
     const length = LENGTHS[state.config.length] || LENGTHS.short;
     return `<div class="sos-section-intro"><span class="sos-kicker">03 / OUTLINE</span><h2>审核剧情大纲</h2><p>故事篇幅：${length.label}。这是节奏和推进密度的倾向，不设本地硬字数上限；AI 必须完整写出开端、发展、转折、高潮、结局、因果链和结局方向。接受后才会用于生成 NPC 和剧情。重 roll 或修改会生成新版本，已完成剧情不会回写。</p></div>${generationDiagnosticsMarkup()}
-        <div class="sos-outline-box ${hasOutline ? '' : 'empty'}">${hasOutline ? `<div class="sos-version">版本 ${state.outlineVersion} · ${state.outline.length} 字</div><div id="sos-outline-text">${escapeHtml(state.outline)}</div>` : '<i>还没有大纲。回到配置页生成一份。</i>'}</div>
+        <div class="sos-outline-box ${hasOutline ? '' : 'empty'}">${hasOutline ? `<div class="sos-version">版本 ${state.outlineVersion} · ${state.outline.length} 字</div><textarea id="sos-outline-editor" class="sos-outline-editor" aria-label="剧情大纲">${escapeHtml(state.outline)}</textarea>` : '<i>还没有大纲。回到配置页生成一份。</i>'}</div>
         <div class="sos-revise"><label>修改意见</label><textarea id="sos-outline-feedback" placeholder="例如：把第三幕改成 user 主动救 NPC，保留已完成部分，只调整后续走向"></textarea></div>
-        <div class="sos-actions"><button type="button" class="sos-secondary" data-action="reroll-outline"><i class="fa-solid fa-dice"></i> 直接重 roll</button><button type="button" class="sos-secondary" data-action="revise-outline"><i class="fa-solid fa-pen"></i> 按意见重写</button><button type="button" class="sos-primary" data-action="accept-outline" ${hasOutline ? '' : 'disabled'}><i class="fa-solid fa-check"></i> 接受大纲并生成 NPC</button></div>`;
+        <div class="sos-actions"><button type="button" class="sos-secondary" data-action="save-outline" ${hasOutline ? '' : 'disabled'}><i class="fa-solid fa-floppy-disk"></i> 保存编辑后的大纲</button><button type="button" class="sos-secondary" data-action="reroll-outline"><i class="fa-solid fa-dice"></i> 直接重 roll</button><button type="button" class="sos-secondary" data-action="revise-outline"><i class="fa-solid fa-pen"></i> 按意见重写</button><button type="button" class="sos-primary" data-action="accept-outline" ${hasOutline ? '' : 'disabled'}><i class="fa-solid fa-check"></i> 接受大纲并生成 NPC</button></div>`;
+}
+
+function saveEditedOutline() {
+    const value = text(document.getElementById('sos-outline-editor')?.value);
+    if (!value) return toastr.warning('大纲不能为空。');
+
+    const parsed = normalizeOutlineData({ outline: value }, value);
+    if (!hasCompleteOutline(parsed)) {
+        return toastr.warning('大纲必须包含完整的开端、发展、转折、高潮和结局。');
+    }
+
+    const current = normalizeOutlineData(state.outlineData, state.outline);
+    const finalOutlineData = {
+        ...parsed,
+        characterNames: parsed.characterNames.length ? parsed.characterNames : current.characterNames,
+        npcFunctions: parsed.npcFunctions.length ? parsed.npcFunctions : current.npcFunctions,
+        nsfwNodes: parsed.nsfwNodes.length ? parsed.nsfwNodes : current.nsfwNodes,
+        hardRules: parsed.hardRules.length ? parsed.hardRules : current.hardRules,
+    };
+    const finalOutline = fitOutlineSections(finalOutlineData);
+    if (state.outline) {
+        state.outlineRevisions.push({ version: state.outlineVersion, outline: state.outline, outlineData: clone(state.outlineData), accepted: state.outlineAccepted, createdAt: Date.now() });
+    }
+    state.outlineData = finalOutlineData;
+    state.outline = finalOutline;
+    state.outlineVersion += 1;
+    state.outlineAccepted = false;
+    state.npcsAccepted = false;
+    state.lastGeneratedAt = Date.now();
+    saveState();
+    rerender();
+    toastr.success('编辑后的大纲已保存，将作为后续 NPC 和剧情生成依据。');
 }
 
 function npcField(label, value, index, field, multiline = false) {
@@ -1443,7 +1486,8 @@ function dashboardMarkup() {
         ['config', '配置', 'fa-sliders'], ['persona', 'user 人设', 'fa-user-pen'], ['outline', '剧情大纲', 'fa-scroll'], ['npc', 'NPC', 'fa-users'], ['story', '推进剧情', 'fa-forward-step'],
     ];
     const content = activeStage === 'config' ? configMarkup() : activeStage === 'persona' ? personaMarkup() : activeStage === 'outline' ? outlineMarkup() : activeStage === 'npc' ? npcMarkup() : storyMarkup();
-    return `<div class="sos-panel"><header class="sos-header"><div><span class="sos-brand">STORY OUTLINE STUDIO</span><h1>剧情大纲工作台</h1></div><div class="sos-header-actions"><button type="button" class="sos-header-button" data-action="reset-project" title="清空本聊天的工作台状态"><i class="fa-solid fa-rotate-left"></i></button><button type="button" class="sos-header-button" data-action="minimize" title="最小化"><i class="fa-solid fa-window-minimize"></i></button><button type="button" class="sos-header-button" data-action="close" title="关闭"><i class="fa-solid fa-xmark"></i></button></div></header><nav class="sos-stage-nav">${stages.map(([key, label, icon]) => `<button type="button" class="${activeStage === key ? 'active' : ''} ${stageComplete(key) ? 'complete' : ''}" data-stage="${key}"><i class="fa-solid ${icon}"></i><span>${label}</span></button>`).join('')}</nav><main class="sos-main">${content}</main><footer class="sos-footer"><span>${state.worldBookName ? `世界书：${escapeHtml(state.worldBookName)}` : '独立工作台 · 当前聊天保存'}</span><span>${ctx.characterId === undefined ? '空白卡 / 独立模式' : '当前角色卡模式'}</span></footer></div><button type="button" class="sos-restore-button" data-action="restore" title="恢复剧情大纲工作台"><i class="fa-solid fa-window-maximize"></i></button>`;
+    const generatingNotice = generating ? `<div class="sos-generating" role="status" aria-live="polite"><i class="fa-solid fa-spinner fa-spin"></i><span>${escapeHtml(generatingLabel)}</span></div>` : '';
+    return `<div class="sos-panel"><header class="sos-header"><div><span class="sos-brand">STORY OUTLINE STUDIO</span><h1>剧情大纲工作台</h1></div><div class="sos-header-actions"><button type="button" class="sos-header-button" data-action="reset-project" title="清空本聊天的工作台状态"><i class="fa-solid fa-rotate-left"></i></button><button type="button" class="sos-header-button" data-action="minimize" title="最小化"><i class="fa-solid fa-window-minimize"></i></button><button type="button" class="sos-header-button" data-action="close" title="关闭"><i class="fa-solid fa-xmark"></i></button></div></header><nav class="sos-stage-nav">${stages.map(([key, label, icon]) => `<button type="button" class="${activeStage === key ? 'active' : ''} ${stageComplete(key) ? 'complete' : ''}" data-stage="${key}"><i class="fa-solid ${icon}"></i><span>${label}</span></button>`).join('')}</nav><main class="sos-main">${generatingNotice}${content}</main><footer class="sos-footer"><span>${state.worldBookName ? `世界书：${escapeHtml(state.worldBookName)}` : '独立工作台 · 当前聊天保存'}</span><span>${ctx.characterId === undefined ? '空白卡 / 独立模式' : '当前角色卡模式'}</span></footer></div><button type="button" class="sos-restore-button" data-action="restore" title="恢复剧情大纲工作台"><i class="fa-solid fa-window-maximize"></i></button>`;
 }
 
 function stageComplete(stage) {
@@ -1646,6 +1690,7 @@ async function handleAction(action, button) {
     }
     if (action === 'restore') {
         panel?.classList.remove('minimized');
+        rerender();
         return;
     }
     if (action === 'zoom-in' || action === 'zoom-out') {
@@ -1684,6 +1729,7 @@ async function handleAction(action, button) {
         return generatePersona(feedback, 'revise');
     }
     if (action === 'accept-persona') return acceptPersona();
+    if (action === 'save-outline') return saveEditedOutline();
     if (action === 'reroll-outline') return generateOutline();
     if (action === 'revise-outline') return reviseOutline();
     if (action === 'accept-outline') return acceptOutline();
@@ -2703,11 +2749,13 @@ async function generateStructured(prompt, schema, responseLength, options = {}) 
     return generateJson(prompt, schema, responseLength, options);
 }
 
-async function withGenerating(task) {
+async function withGenerating(task, label = '正在生成中...') {
     if (generating) return;
     generating = true;
     const taskEpoch = generationEpoch;
     panel?.classList.add('busy');
+    generatingLabel = label;
+    rerender();
     try {
         await task(taskEpoch);
     } catch (error) {
@@ -2719,6 +2767,7 @@ async function withGenerating(task) {
     } finally {
         generating = false;
         panel?.classList.remove('busy');
+        rerender();
     }
 }
 
@@ -2796,7 +2845,7 @@ async function generatePersona(feedback = '', mode = 'new', continuation = null)
         saveState();
         activeStage = 'persona';
         rerender();
-    });
+    }, '正在生成 user 人设...');
 }
 
 async function revisePersona() {
@@ -2879,11 +2928,12 @@ async function generateOutline(feedback = '', mode = 'new', continuation = null)
             outlineResponseLength,
             { allowText: true, continuationRaw: continuation?.raw || '', continuationMeta: { mode, feedback } },
         );
-        const outlineData = mode === 'revise'
+        const finalOutlineData = mode === 'revise'
             ? mergeOutlineData(
                 state.outlineData,
                 (() => {
                     const next = normalizeOutlineData(result, result.outline ? '' : text(result));
+                    if (hasCompleteOutline(next)) return next;
                     const restricted = restrictOutlineRevision(next, feedback);
                     return Object.keys(restricted).length
                         ? restricted
@@ -2892,31 +2942,27 @@ async function generateOutline(feedback = '', mode = 'new', continuation = null)
             )
             : normalizeOutlineData(result, result.outline ? '' : text(result));
 
-        if (!outlineData.opening
-            || !outlineData.development
-            || !outlineData.turningPoint
-            || !outlineData.climax
-            || !outlineData.ending) {
+        if (!hasCompleteOutline(finalOutlineData)) {
             throw new Error('AI 返回的大纲缺少完整的开端、发展、转折、高潮或结局，请重试。');
         }
         if (currentName && oldUserNames.length
-            && containsAnyName(outlineText(outlineData), oldUserNames)) {
+            && containsAnyName(outlineText(finalOutlineData), oldUserNames)) {
             throw new Error('AI 返回的大纲仍包含旧 user 姓名，已拒绝写入；当前大纲未被覆盖。');
         }
         if (currentName) {
-            outlineData.characterNames = unique([
+            finalOutlineData.characterNames = unique([
                 currentName,
-                ...outlineData.characterNames,
+                ...finalOutlineData.characterNames,
             ]);
         }
-        const outline = fitOutlineSections(outlineData);
+        const finalOutline = fitOutlineSections(finalOutlineData);
         if (state.outline) {
             state.outlineRevisions.push({ version: state.outlineVersion, outline: state.outline, outlineData: clone(state.outlineData), accepted: state.outlineAccepted, createdAt: Date.now() });
         }
-        state.outlineData = outlineData;
-        state.outline = outline;
+        state.outlineData = finalOutlineData;
+        state.outline = finalOutline;
         if (mode === 'new') {
-            state.outlineGenerationHistory = [...outlineHistory, clone(outlineData)].slice(-8);
+            state.outlineGenerationHistory = [...outlineHistory, clone(finalOutlineData)].slice(-8);
         }
         state.outlineVersion += 1;
         state.outlineAccepted = false;
@@ -2925,7 +2971,7 @@ async function generateOutline(feedback = '', mode = 'new', continuation = null)
         saveState();
         activeStage = 'outline';
         rerender();
-    });
+    }, '正在生成剧情大纲...');
 }
 
 async function reviseOutline() {
@@ -3011,7 +3057,7 @@ async function generateNpcs(feedback = '', mode = 'new', continuation = null) {
         rerender();
         const invalid = nextNpcs.map(validateNpc).filter(Boolean);
         if (invalid.length) toastr.warning('已保留 AI 返回的 NPC 草稿；部分字段不完整，请在接受前补全或按意见修改。');
-    });
+    }, '正在生成 NPC...');
 }
 
 function getWorldBookTarget() {

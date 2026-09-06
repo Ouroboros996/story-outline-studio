@@ -23,6 +23,8 @@
 #sos-overlay.minimized { display: block; pointer-events: none; background: transparent; }
 #sos-overlay.minimized .sos-panel { display: none; }
 #sos-overlay.busy { cursor: progress; }
+.sos-generating { display: flex; align-items: center; gap: 8px; margin: 0 0 16px; padding: 10px 13px; border: 1px solid var(--sos-accent); background: #171b22; color: var(--sos-accent); font-size: 13px; }
+.sos-generating i { font-size: 14px; }
 .sos-panel { width: min(1180px, 100%); height: min(900px, 94vh); max-height: calc(100dvh - 56px); display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; background: var(--sos-panel); border: 1px solid var(--sos-line); box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48); overflow: hidden; zoom: var(--sos-zoom); }
 .sos-header { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 22px 28px; border-bottom: 1px solid var(--sos-line); background: #12161c; }
 .sos-header > div:first-child { min-width: 0; }
@@ -92,6 +94,7 @@
 .sos-ok { color: var(--sos-accent-2); }
 .sos-warn { color: var(--sos-accent); }
 .sos-outline-box { min-height: 260px; line-height: 1.8; white-space: pre-wrap; }
+.sos-outline-editor { display: block; width: 100%; min-height: 420px; resize: vertical; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
 .sos-outline-box.empty, .sos-empty { color: var(--sos-muted); }
 .sos-version { color: var(--sos-accent); font-size: 11px; margin-bottom: 12px; }
 .sos-revise { margin-top: 20px; }
