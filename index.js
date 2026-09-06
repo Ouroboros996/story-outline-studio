@@ -189,6 +189,17 @@ function worldBookEntriesObject(data) {
     return normalizeWorldBookData(data).entries;
 }
 
+function isWorldBookEntryEnabled(entry) {
+    if (!entry || typeof entry !== 'object') return false;
+    const extensions = entry.extensions && typeof entry.extensions === 'object' ? entry.extensions : {};
+    return entry.disable !== true
+        && entry.disabled !== true
+        && entry.enabled !== false
+        && extensions.disable !== true
+        && extensions.disabled !== true
+        && extensions.enabled !== false;
+}
+
 const asList = value => {
     if (Array.isArray(value)) return value.filter(Boolean).map(item => typeof item === 'object' ? text(item.name ?? item.label ?? item.value ?? item.text ?? item.content ?? item.quote ?? item.alias ?? item.key ?? JSON.stringify(item)) : String(item));
     const source = text(value);
@@ -1836,7 +1847,7 @@ function referenceBooksText() {
     for (const book of state.importedWorldBooks) {
         const entries = [];
         for (const entry of book.entries) {
-            if (entry?.enabled === false) continue;
+            if (!isWorldBookEntryEnabled(entry)) continue;
             if (isStoryNpcEntry(entry)) continue;
             const remaining = maxTotal - used;
             if (remaining <= 0) break;
@@ -1856,7 +1867,7 @@ function referenceBooksText() {
         if (data?.entries && typeof data.entries === 'object') {
             const entries = [];
             for (const entry of Object.values(data.entries)) {
-                if (entry?.disable === true || entry?.enabled === false || entry?.extensions?.disabled === true) continue;
+                if (!isWorldBookEntryEnabled(entry)) continue;
                 if (isStoryNpcEntry(entry)) continue;
                 const remaining = maxTotal - used;
                 if (remaining <= 0) break;
@@ -3094,7 +3105,11 @@ async function importWorldBook(event) {
         const book = card?.character_book || parsed?.character_book || parsed;
         const rawEntries = book?.entries;
         const entries = Array.isArray(rawEntries) ? rawEntries : rawEntries && typeof rawEntries === 'object' ? Object.values(rawEntries) : [];
-        const normalized = entries.map(entry => ({ keys: unique([...asList(entry.key), ...asList(entry.keys), ...asList(entry.keysecondary)]), content: text(entry.content || entry.description) })).filter(entry => entry.content);
+        const normalized = entries.map(entry => ({
+            keys: unique([...asList(entry.key), ...asList(entry.keys), ...asList(entry.keysecondary)]),
+            content: text(entry.content || entry.description),
+            enabled: isWorldBookEntryEnabled(entry),
+        })).filter(entry => entry.content);
         const getCardField = (...keys) => keys.map(key => card?.[key] ?? parsed?.[key]).find(value => value !== undefined && value !== null);
         const characterFields = ['name', 'description', 'personality', 'scenario', 'first_mes', 'mes_example', 'system_prompt', 'post_history_instructions', 'creator_notes', 'creatorcomment'];
         const hasCharacter = characterFields.some(field => text(getCardField(field)));
