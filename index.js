@@ -1715,6 +1715,31 @@ function getCurrentCharacterBook() {
     try { return normalizeWorldBookData(book); } catch { return null; }
 }
 
+async function loadCharacterOwnedWorldBook() {
+    const embedded = getCurrentCharacterBook();
+    if (embedded) return cloneWorldBookData(embedded);
+
+    const data = { entries: {} };
+    const linkedNames = unique([
+        getWorldBookTarget(),
+        ...getCharacterExtraWorldBookNames(),
+    ]);
+
+    for (const name of linkedNames) {
+        if (!name) continue;
+        const linked = cloneWorldBookData(await loadWorldInfo(name));
+        for (const entry of Object.values(linked.entries || {})) {
+            const baseUid = String(entry.uid ?? Object.keys(data.entries).length);
+            let uid = baseUid;
+            let suffix = 1;
+            while (data.entries[uid]) uid = `${baseUid}-${suffix++}`;
+            data.entries[uid] = { ...clone(entry), uid };
+        }
+    }
+
+    return data;
+}
+
 function linkedReferenceWorldBookNames() {
     const names = [];
     const characterBook = getWorldBookTarget();
@@ -2870,7 +2895,7 @@ function npcToWorldEntry(npc) {
     const storyId = ensureStoryId();
     const keys = unique([name, ...normalized.aliases, name.split(/\s+/).at(-1)]);
     const content = `[剧情大纲工作台 NPC]\n故事 ID：${storyId}\n姓名：${name}\n关键词：${keys.join('、')}\n性别：${normalized.gender}\n年龄：${normalized.age}\n身高：${normalized.height}\n外貌：${normalized.appearance}\n性格：${normalized.personality}\n身份背景：${normalized.identity}\n过去经历：${normalized.past}\n与 user 的关系：${normalized.relationship}\n对 user 的态度：${normalized.attitude}\n典型语录：${normalized.quotes.join('；')}\nNSFW偏好与语言风格：${normalized.nsfw}\n身体信息：${normalized.body}`;
-    return { keys, content, comment: `SOS NPC - ${storyId} - ${name}`, enabled: normalized.enabled !== false };
+    return { keys, content, comment: name, enabled: normalized.enabled !== false };
 }
 
 async function acceptNpcs() {
@@ -2879,21 +2904,18 @@ async function acceptNpcs() {
     const invalid = state.npcs.map(validateNpc).find(Boolean);
     if (invalid) return toastr.warning(`${invalid} 请先修改。`);
     await withGenerating(async () => {
-        const existingChatBook = text(ctx.chatMetadata?.[CHAT_WORLD_INFO_KEY]);
         const bookName = storyWorldBookName();
-        // Character-bound lorebooks are shared by every chat using the card.
-        // Clone the current chat book when present, then keep generated NPCs in
-        // this chat's own book so separate story windows cannot overwrite each
-        // other's cast.
-        const sourceName = existingChatBook && existingChatBook !== bookName ? existingChatBook : bookName;
-        const data = cloneWorldBookData(await loadWorldInfo(sourceName));
+        // Start each story book from the current character's own lorebook.
+        // The chat-attached book may belong to an older story window and must
+        // never be used as the NPC import source.
+        const data = await loadCharacterOwnedWorldBook();
         if (!data.entries || typeof data.entries !== 'object') data.entries = {};
         for (const [entryId, entry] of Object.entries(data.entries)) {
             if (isStoryNpcEntry(entry)) delete data.entries[entryId];
         }
         for (const npc of state.npcs) {
             const normalized = npcToWorldEntry(npc);
-            const existing = Object.values(data.entries).find(entry => text(entry?.comment) === normalized.comment);
+            const existing = Object.values(data.entries).find(entry => isStoryNpcEntry(entry) && text(entry?.comment) === normalized.comment);
             const entry = existing || createWorldInfoEntry(bookName, data);
             if (!entry) continue;
             entry.key = normalized.keys;
@@ -2903,6 +2925,7 @@ async function acceptNpcs() {
             entry.constant = false;
             entry.selective = false;
             entry.order = 100;
+            entry.position = 1;
             entry.disable = normalized.enabled === false;
         }
         await saveWorldInfo(bookName, data, true);
