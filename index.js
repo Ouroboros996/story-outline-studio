@@ -94,6 +94,8 @@ let activeStage = 'config';
 let panel = null;
 let generating = false;
 let generationEpoch = 0;
+let continuationGenerationInProgress = false;
+let structuredGenerationInProgress = false;
 let activeChatKey = '';
 let buttonRetryTimer = null;
 let buttonRetryCount = 0;
@@ -608,6 +610,7 @@ function defaultState() {
         userTurnCount: 0,
         completedStorySnapshot: '',
         completedStoryMessages: 0,
+        trackedStoryMessageKeys: [],
         worldBookName: '',
         referenceWorldBookName: '',
         attachedWorldBookName: '',
@@ -645,6 +648,9 @@ function getState() {
         ? next.outlineGenerationHistory.map(item => normalizeOutlineData(item)).filter(item => outlineSignature(item))
         : [];
     next.npcNameHistory = unique(next.npcNameHistory);
+    next.trackedStoryMessageKeys = Array.isArray(next.trackedStoryMessageKeys)
+        ? unique(next.trackedStoryMessageKeys).slice(-200)
+        : [];
     next.storyId = text(next.storyId);
     next.referenceWorldBookName = text(next.referenceWorldBookName);
     next.lastGeneration = next.lastGeneration && typeof next.lastGeneration === 'object'
@@ -2362,6 +2368,7 @@ async function generateJson(prompt, schema, responseLength = 1200, { allowText =
     const requestEpoch = generationEpoch;
     const kind = generationKind(schema);
     let result;
+    structuredGenerationInProgress = true;
     try {
         result = await request();
         if (requestEpoch !== generationEpoch) {
@@ -2374,6 +2381,8 @@ async function generateJson(prompt, schema, responseLength = 1200, { allowText =
         if (error?.sosStale) wrapped.sosStale = true;
         if (!error?.sosStale) saveGenerationSnapshot(kind, { error: wrapped.message });
         throw wrapped;
+    } finally {
+        structuredGenerationInProgress = false;
     }
     const embeddedError = responseErrorMessage(result);
     if (embeddedError) {
@@ -2424,6 +2433,7 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
     // govern narrative turns. Leaving it active here can make a revision echo
     // the story prompt instead of returning the requested structure.
     ctx.setExtensionPrompt?.(PROMPT_KEY, '', 1, 0, false);
+    structuredGenerationInProgress = true;
     try {
         // A structured-generation button must not accidentally submit text
         // that the user has left in the normal chat composer.
@@ -2484,6 +2494,7 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
             textarea.value = pendingUserInput;
             textarea.dispatchEvent(new Event('input', { bubbles: true }));
         }
+        structuredGenerationInProgress = false;
         updateContinuityPrompt();
     }
 
@@ -2591,13 +2602,13 @@ async function generatePersona(feedback = '', mode = 'new') {
             ? `\n当前 user 人设草稿（这是本次修改的基线；除非特别要求，不要改动已有字段）：${previousPersona}`
             : '';
         const revision = mode === 'revise'
-            ? `\n用户修改意见：${feedback}\n这是局部修改，不是重新创作。只修改意见明确点名的字段或内容；未点名的姓名、年龄、外貌、性格、身份、经历、习惯、边界必须逐字保留。输出仍须包含完整字段。`
+            ? `\n用户修改意见：${feedback}\n这是基于当前人设的修改。只修改意见明确点名的字段或内容；未点名的姓名、年龄、外貌、性格、身份、经历、习惯、边界必须逐字保留。无论修改了几个字段，都必须重新输出一份完整的人设结果，包含全部字段，不能只返回修改部分，也不能使用 persona_patch。`
             : '';
         const novelty = mode === 'new'
             ? `\n这是全新生成，不是对旧人设润色。随机生成标识：${generationNonce('persona')}。请更换姓名、成长经历、职业细节和辨识度特征，不要复用当前草稿。`
             : '';
         const prompt = `${basePrompt()}\n请生成 user 的故事人设。必须返回完整字段：name、gender、age、appearance、personality、identity、past、habits、boundaries。设定要和配置的背景、性别方向、剧情标签兼容；如果故事包含成人内容，年龄字段必须明确为成年人。${previous}${revision}${novelty}\n保留基线中未被明确要求修改的内容；不要返回空字段。若无法返回 JSON，请输出 <persona> 标签，标签内每行一个“字段：内容”。`;
-        const result = await generateJson(prompt, { type: 'object', properties: { name: { type: 'string' }, gender: { type: 'string' }, age: { type: 'string' }, appearance: { type: 'string' }, personality: { type: 'string' }, identity: { type: 'string' }, past: { type: 'string' }, habits: { type: 'string' }, boundaries: { type: 'string' } }, required: ['name', 'gender', 'age', 'appearance', 'personality', 'identity', 'past', 'habits', 'boundaries'] }, 1800, { allowText: true, patchTag: mode === 'revise' ? 'persona_patch' : '' });
+        const result = await generateJson(prompt, { type: 'object', properties: { name: { type: 'string' }, gender: { type: 'string' }, age: { type: 'string' }, appearance: { type: 'string' }, personality: { type: 'string' }, identity: { type: 'string' }, past: { type: 'string' }, habits: { type: 'string' }, boundaries: { type: 'string' } }, required: ['name', 'gender', 'age', 'appearance', 'personality', 'identity', 'past', 'habits', 'boundaries'] }, 1800, { allowText: true });
         const nextPersona = mode === 'revise'
             ? mergePersonaData(
                 state.userPersonaData || state.userPersona,
@@ -2688,7 +2699,7 @@ async function generateOutline(feedback = '', mode = 'new') {
             ? `\n当前聊天 user 的唯一姓名是“${currentName}”。大纲中的 user 必须指向这个姓名，不得使用旧 user 姓名${oldUserNames.length ? `（例如：${oldUserNames.join('、')}）` : ''}。请在 characterNames 中明确列出“${currentName}”。`
             : '\n当前聊天尚未确定 user 姓名，不要擅自从旧资料推断姓名。';
         const revision = mode === 'revise'
-            ? `\n用户修改意见：${feedback}\n这是基于当前大纲的局部修订。必须保留未被意见点名的段落、人物事实、关键词落实方式和结局方向；已完成剧情绝不能改写，只调整未完成部分。`
+            ? `\n用户修改意见：${feedback}\n这是基于当前大纲的修改。必须保留未被意见点名的段落、人物事实、关键词落实方式和结局方向；已完成剧情绝不能改写，只调整未完成部分。无论修改了几个段落，都必须重新输出一份完整的五段大纲和全部元数据，包含开端、发展、转折、高潮、结局、主要角色名、NPC 功能、NSFW 节点和硬性规则，不能只返回修改部分，也不能使用 outline_patch。`
             : '';
         const prompt = `${basePrompt()}\n任务：生成一份${length.label}小说剧情大纲。短篇、中篇、长篇只表示整体篇幅倾向、事件密度和推进节奏，不是硬性字数上限；工作台不会从 AI 返回的大纲中截断任何内容。输出必须包含开端、发展、转折、高潮、结局五段，按这五段分别填写字段，不能把所有内容塞入单一 outline 字段。先完整规划起承转合、因果链、高潮和明确结局，再控制叙述密度。不得使用“……”或"..."代替未完成内容，不得因为篇幅省略结局、因果链、关键词落实或 NSFW 节点。每段都要简洁但必须有具体事件、因果和结局。严格落实所有已选背景、关系、基调、结局、情节关键词和特别要求，不得自行删掉标签。另列出主要 NPC 功能、NSFW 节点、硬性规则。必须在 characterNames（主要角色名）中列出当前 user 和每一名主要 NPC 的最终姓名，不能只写“user”“NPC”或职能。${nsfwRule}\n所有人物必须明确为成年人，性行为必须发生在成年人之间并符合用户设定。${identityRule}${previous}${novelty}${revision}${completed}\n若无法返回 JSON，请使用纯文本标签：<outline>内含“开端：...\n发展：...\n转折：...\n高潮：...\n结局：...”</outline>，并另写“主要角色名：user姓名、全部主要 NPC 姓名”。`;
         // Leave enough upstream output budget for a complete five-part outline
@@ -2699,7 +2710,7 @@ async function generateOutline(feedback = '', mode = 'new') {
             prompt,
             outlineSchema(),
             outlineResponseLength,
-            { allowText: true, patchTag: mode === 'revise' ? 'outline_patch' : '' },
+            { allowText: true },
         );
         const outlineData = mode === 'revise'
             ? mergeOutlineData(
@@ -2781,7 +2792,7 @@ async function generateNpcs(feedback = '', mode = 'new') {
             ? `\n这是全新 NPC 阵容，不是对当前草稿换词。随机生成标识：${generationNonce('npc')}。每名 NPC 必须采用全新的姓名，严禁使用以下历史姓名或其同音/近似写法：${previousNames.join('、') || '暂无'}。NPC 姓名不得等于当前 user“${currentName || '未命名'}”。人物身份、核心矛盾、外貌辨识度和说话方式也要与历史阵容明显不同。`
             : '';
         const revision = mode === 'revise'
-            ? `\n用户 NPC 修改意见：${feedback}\n这是基于当前 NPC 草稿的局部修改，不是全部重写。只修改意见明确点名的 NPC、字段或内容；未点名的 NPC 以及未点名字段必须保持原值，尤其是姓名、身份、核心性格、关系、说话方式和已确认的成年人年龄。`
+            ? `\n用户 NPC 修改意见：${feedback}\n这是基于当前 NPC 草稿的修改。只修改意见明确点名的 NPC、字段或内容；未点名的 NPC 以及未点名字段必须保持原值，尤其是姓名、身份、核心性格、关系、说话方式和已确认的成年人年龄。无论修改了几个字段，都必须重新输出全部 NPC 的完整结果，每名 NPC 都要包含全部字段，不能只返回修改部分，也不能使用 npc_patch。`
             : '';
         const npcCountRule = state.config.relationshipMode === 'NP'
             ? '关系数量为 NP：生成所有承担主要关系线、冲突线或 NSFW 节点的主要 NPC，至少 2 人；不要只返回一个代表角色。'
@@ -2792,7 +2803,7 @@ async function generateNpcs(feedback = '', mode = 'new') {
             prompt,
             npcSchema,
             state.config.relationshipMode === 'NP' ? 16000 : 10000,
-            { allowText: true, patchTag: mode === 'revise' ? 'npc_patch' : '' },
+            { allowText: true },
         );
         let nextNpcs = mode === 'revise'
             ? mergeNpcDrafts(
@@ -3078,10 +3089,40 @@ function isContinuationDirective(value) {
     return /^(?:继续剧情|继续|下一楼|推进剧情|继续下一楼|continue(?:\s+story)?)[。！!？?\s]*$/i.test(text(value));
 }
 
+function storyMessageKey(message, index) {
+    const id = text(message?.mesId || message?.id || message?.send_date);
+    return id ? `${id}:${index}` : `${index}:${text(message?.name)}:${text(message?.mes).slice(0, 160)}`;
+}
+
+function trackReceivedStoryMessage(messageIndex) {
+    if (!state?.outlineAccepted || !state?.npcsAccepted || structuredGenerationInProgress || continuationGenerationInProgress) return;
+    const index = Number(messageIndex);
+    const message = Number.isInteger(index) ? ctx.chat?.[index] : null;
+    if (!message || message.is_user || !text(message.mes) || message.extra?.storyOutlineStudioTemporary || message.extra?.storyOutlineStudioDraft) return;
+    const key = storyMessageKey(message, index);
+    if (state.trackedStoryMessageKeys.includes(key) || message.extra?.storyOutlineStudio?.countedInteraction) return;
+    state.trackedStoryMessageKeys = [...state.trackedStoryMessageKeys, key].slice(-200);
+    state.currentTurn += 1;
+    state.completedStoryMessages += 1;
+    state.completedStorySnapshot = `${state.completedStorySnapshot}\n${text(message.mes)}`.trim().slice(-12000);
+    message.extra = {
+        ...(message.extra || {}),
+        storyOutlineStudio: {
+            version: state.outlineVersion,
+            turn: state.currentTurn,
+            countedInteraction: true,
+        },
+    };
+    saveState();
+    void ctx.saveChat?.();
+    if (panel?.classList.contains('open')) rerender();
+}
+
 async function continueStory() {
     await withGenerating(async () => {
         if (!state.outlineAccepted || !state.npcsAccepted) return toastr.warning('请先接受大纲和 NPC。');
         const beforeLength = ctx.chat.length;
+        continuationGenerationInProgress = true;
         try {
             // Use the foreground generation pipeline so SillyTavern owns the
             // streamed message, chat persistence, preset, and World Info.
@@ -3093,29 +3134,31 @@ async function continueStory() {
                 skipWIAN: false,
                 force_name2: true,
             });
+            const generated = ctx.chat.slice(beforeLength)
+                .filter(message => !message.is_user && text(message.mes))
+                .at(-1);
+            const content = text(generated?.mes);
+            if (!generated || !content) throw new Error('酒馆请求已完成，但没有写入剧情消息。请检查 API 响应和酒馆控制台。');
+            state.currentTurn += 1;
+            state.completedStoryMessages += 1;
+            state.completedStorySnapshot = `${state.completedStorySnapshot}\n${content}`.trim().slice(-12000);
+            state.userTurnCount += 1;
+            generated.extra = {
+                ...(generated.extra || {}),
+                storyOutlineStudio: {
+                    version: state.outlineVersion,
+                    turn: state.currentTurn,
+                    countedInteraction: true,
+                },
+            };
+            saveState();
+            await ctx.saveChat?.();
+            rerender();
         } catch (error) {
             throw wrapGenerationError(error);
+        } finally {
+            continuationGenerationInProgress = false;
         }
-        const generated = ctx.chat.slice(beforeLength)
-            .filter(message => !message.is_user && text(message.mes))
-            .at(-1);
-        const content = text(generated?.mes);
-        if (!generated || !content) throw new Error('酒馆请求已完成，但没有写入剧情消息。请检查 API 响应和酒馆控制台。');
-        state.currentTurn += 1;
-        state.completedStoryMessages += 1;
-        state.completedStorySnapshot = `${state.completedStorySnapshot}\n${content}`.trim().slice(-12000);
-        state.userTurnCount += 1;
-        generated.extra = {
-            ...(generated.extra || {}),
-            storyOutlineStudio: {
-                version: state.outlineVersion,
-                turn: state.currentTurn,
-                countedInteraction: true,
-            },
-        };
-        saveState();
-        await ctx.saveChat?.();
-        rerender();
     });
 }
 
@@ -3209,6 +3252,9 @@ function installEvents() {
         if (message?.extra?.storyOutlineStudio?.countedInteraction) return;
         state.userTurnCount += 1;
         saveState();
+    });
+    ctx.eventSource?.on?.(ctx.eventTypes.MESSAGE_RECEIVED, messageIndex => {
+        trackReceivedStoryMessage(messageIndex);
     });
 }
 
