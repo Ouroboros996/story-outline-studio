@@ -1223,6 +1223,34 @@ function taggedNpcPatches(raw) {
     }).filter(Boolean);
 }
 
+function outlineCharacterNamesFromText(raw) {
+    const names = [];
+    const source = stripReasoningBlocks(raw);
+    const labeled = /(?:^|\n)\s*(?:主要\s*)?(?:角色名|人物名|主要角色姓名|主要NPC|NPC名单|角色列表)\s*[：:]\s*([^\n<]+)/giu;
+    for (const match of source.matchAll(labeled)) {
+        names.push(...asList(match[1].replace(/[；;]/gu, '、')));
+    }
+
+    // Models occasionally follow the outline protocol but put names only in
+    // the prose, e.g. "开端：艾琳是..." or "随后陆骁决定...". Extract only
+    // short Han-character spans immediately before common person predicates;
+    // this is deliberately conservative so a location or job title is not
+    // turned into an NPC name just because it appears in the outline.
+    const prose = source
+        .replace(/<[^>]+>/g, '\n')
+        .replace(/^(?:开端|发展|转折|高潮|结局)\s*[：:].*$/gim, line => line.replace(/^[^：:]+[：:]/, ''));
+    const predicates = '(?:是|为|曾是|担任|身为|作为|来自|在|与|和|却|但|并|也|仍|突然|立刻|开始|决定|拒绝|发现|调查|追查|带着|拿出|转身|说道|开口|问道|回答|冷笑|低声)';
+    const prosePattern = new RegExp(`(?:^|[。！？；，、\s])([\\p{Script=Han}]{2,4})(?=${predicates})`, 'gu');
+    for (const match of prose.matchAll(prosePattern)) names.push(match[1]);
+
+    const excluded = new Set([
+        '开端', '发展', '转折', '高潮', '结局', '故事', '剧情', '事件', '三年前',
+        '随后', '此时', '当天', '最终', '因此', '然而', '于是', '因为', '如果',
+        '香港', '九龙', '重案组', '调查组', '警方', '现场', '案件', '镜像',
+    ]);
+    return unique(names.filter(name => !excluded.has(name) && !/^第[一二三四五六七八九十\d]+/.test(name)));
+}
+
 function normalizeOutlineData(value, raw = '') {
     const source = value && typeof value === 'object' ? value : {};
     const legacy = stripReasoningBlocks(text(source.outline ?? source['大纲'] ?? source['剧情大纲'] ?? source.content ?? raw))
@@ -1243,7 +1271,10 @@ function normalizeOutlineData(value, raw = '') {
         turningPoint: get('turningPoint', '转折', 'turning_point', 'turning', '转折'),
         climax: get('climax', '高潮', 'climax', '高潮'),
         ending: get('ending', '结局', 'end', 'ending', '结局'),
-        characterNames: unique(asList(source.characterNames ?? source['主要角色名'] ?? source['角色名'] ?? tagged('character_names'))),
+        characterNames: unique([
+            ...asList(source.characterNames ?? source['主要角色名'] ?? source['角色名'] ?? tagged('character_names')),
+            ...outlineCharacterNamesFromText(raw),
+        ]),
         npcFunctions: asList(source.npcFunctions ?? source['主要 NPC 功能'] ?? source['主要NPC功能'] ?? tagged('npc_functions')),
         nsfwNodes: asList(source.nsfwNodes ?? source['NSFW 节点'] ?? source['NSFW节点'] ?? tagged('nsfw_nodes')),
         hardRules: asList(source.hardRules ?? source['硬性规则'] ?? tagged('hard_rules')),
@@ -1692,17 +1723,28 @@ function getLinkedReferenceWorldBookName() {
     return linkedReferenceWorldBookNames()[0] || '';
 }
 
+function explicitReferenceWorldBookName() {
+    const selected = text(state?.referenceWorldBookName);
+    if (!selected) return '';
+    // Keep a successfully loaded manual choice valid while SillyTavern is
+    // refreshing its world-info list. The list can briefly be empty during a
+    // refresh, which used to make the UI and prompt fall back to the linked
+    // character world book immediately after a successful selection.
+    if (loadedReferenceWorldBooks.has(selected)) return selected;
+    return getAvailableWorldBookNames().includes(selected) ? selected : '';
+}
+
 function selectedReferenceWorldBookName() {
-    const bound = getLinkedReferenceWorldBookName();
-    if (bound) return bound;
-    const selected = text(state.referenceWorldBookName);
-    return selected && getAvailableWorldBookNames().includes(selected) ? selected : '';
+    const selected = explicitReferenceWorldBookName();
+    if (selected) return selected;
+    return getLinkedReferenceWorldBookName();
 }
 
 async function ensureReferenceWorldBookLoaded() {
     await refreshAvailableWorldBooks();
+    const explicit = explicitReferenceWorldBookName();
     const linked = linkedReferenceWorldBookNames();
-    const names = linked.length ? linked : (selectedReferenceWorldBookName() ? [selectedReferenceWorldBookName()] : []);
+    const names = unique([...(explicit ? [explicit] : []), ...linked]);
     if (!names.length) {
         loadedReferenceWorldBooks = new Map();
         return;
@@ -1716,7 +1758,6 @@ async function ensureReferenceWorldBookLoaded() {
 
 async function selectReferenceWorldBook(name) {
     const requested = text(name);
-    const available = await refreshAvailableWorldBooks();
     if (!requested) {
         state.referenceWorldBookName = '';
         loadedReferenceWorldBooks = new Map();
@@ -1724,8 +1765,11 @@ async function selectReferenceWorldBook(name) {
         rerender();
         return;
     }
+    const available = await refreshAvailableWorldBooks();
     if (!available.includes(requested)) throw new Error('找不到所选世界书，可能已被删除；请刷新后重新选择。');
     const data = normalizeWorldBookData(await loadWorldInfo(requested));
+    // Persist the choice before any redraw or asynchronous refresh can read
+    // the old metadata snapshot.
     state.referenceWorldBookName = requested;
     loadedReferenceWorldBooks.set(requested, data);
     saveState();
@@ -1764,9 +1808,8 @@ function referenceBooksText() {
         if (entries.length) books.push(`<reference_worldbook name="${escapeHtml(book.name)}">${entries.join('')}\n</reference_worldbook>`);
         if (used >= maxTotal) break;
     }
-    const linkedNames = linkedReferenceWorldBookNames();
-    const selected = linkedNames.length ? '' : selectedReferenceWorldBookName();
-    const selectedNames = unique([...linkedNames, ...(selected ? [selected] : [])]);
+    const explicit = explicitReferenceWorldBookName();
+    const selectedNames = unique([...(explicit ? [explicit] : []), ...linkedReferenceWorldBookNames()]);
     for (const bookName of selectedNames) {
         const data = loadedReferenceWorldBooks.get(bookName);
         if (data?.entries && typeof data.entries === 'object') {
@@ -2185,7 +2228,12 @@ function parseGeneratedPayload(raw, allowText = false, schema = null) {
     const outlinePatch = extractTaggedBlocks(source, 'outline_patch')[0];
     if (outlinePatch && schema?.properties?.opening) return normalizeGeneratedResult({ outline_patch: extractJson(outlinePatch) || parseKeyValueBlock(outlinePatch) }, schema);
     const outlineBlock = extractTaggedBlocks(source, 'outline')[0];
-    if (outlineBlock) return normalizeGeneratedResult({ outline: outlineBlock }, schema);
+    if (outlineBlock) {
+        return normalizeGeneratedResult({
+            outline: outlineBlock,
+            characterNames: outlineCharacterNamesFromText(source),
+        }, schema);
+    }
 
     const parsed = extractJson(source);
     if (parsed && !(typeof parsed === 'object' && !Object.keys(parsed).length)) return normalizeGeneratedResult(parsed, schema);
@@ -2672,10 +2720,6 @@ async function generateOutline(feedback = '', mode = 'new') {
             || !outlineData.climax
             || !outlineData.ending) {
             throw new Error('AI 返回的大纲缺少完整的开端、发展、转折、高潮或结局，请重试。');
-        }
-        const minimumCharacterNames = state.config.relationshipMode === 'NP' ? 3 : 2;
-        if (mode === 'new' && currentName && outlineData.characterNames.length < minimumCharacterNames) {
-            throw new Error('AI 返回的大纲缺少足够的主要角色姓名，已拒绝写入；当前大纲未被覆盖。');
         }
         if (currentName && oldUserNames.length
             && containsAnyName(outlineText(outlineData), oldUserNames)) {
