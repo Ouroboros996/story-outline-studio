@@ -1,20 +1,20 @@
 #sos-overlay {
     --sos-zoom: 1;
-    --sos-ink: #17324a;
-    --sos-muted: #607487;
-    --sos-subtle: #8a9baa;
-    --sos-line: #d8e4ea;
-    --sos-line-strong: #c1d3dc;
-    --sos-panel: #ffffff;
-    --sos-panel-2: #f4f9fb;
-    --sos-panel-3: #edf5f7;
-    --sos-accent: #2d9b78;
-    --sos-accent-dark: #197354;
-    --sos-accent-soft: #e0f3eb;
-    --sos-blue: #3f78b5;
-    --sos-blue-soft: #e8f1fb;
-    --sos-warning: #b77928;
-    --sos-danger: #b84b56;
+    --sos-ink: #263b46;
+    --sos-muted: #6d7d83;
+    --sos-subtle: #919d9d;
+    --sos-line: #dddcd2;
+    --sos-line-strong: #c8cec8;
+    --sos-panel: #fbfaf3;
+    --sos-panel-2: #f4f5ed;
+    --sos-panel-3: #eef2ec;
+    --sos-accent: #5b9a7d;
+    --sos-accent-dark: #3f765f;
+    --sos-accent-soft: #e4eee7;
+    --sos-blue: #6689a6;
+    --sos-blue-soft: #e9eff2;
+    --sos-warning: #aa8654;
+    --sos-danger: #a9686d;
     display: none;
     position: fixed;
     inset: 0;
@@ -40,28 +40,28 @@
 #sos-overlay select { font: inherit; }
 #sos-overlay button { border-radius: 6px; }
 
-.sos-generating { display: flex; align-items: center; gap: 9px; margin: 0 0 18px; padding: 11px 13px; border: 1px solid #b8dfd0; border-left: 3px solid var(--sos-accent); background: var(--sos-accent-soft); color: var(--sos-accent-dark); font-size: 13px; font-weight: 650; }
+.sos-generating { display: flex; align-items: center; gap: 9px; margin: 0 0 18px; padding: 11px 13px; border: 1px solid #c5d8cc; border-left: 3px solid var(--sos-accent); background: var(--sos-accent-soft); color: var(--sos-accent-dark); font-size: 13px; font-weight: 650; }
 .sos-generating i { color: var(--sos-accent); font-size: 14px; }
 
 .sos-panel { width: min(1180px, 100%); height: min(900px, 94vh); max-height: calc(100dvh - 56px); display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; background: var(--sos-panel); border: 1px solid var(--sos-line-strong); border-radius: 8px; box-shadow: 0 22px 60px rgba(26, 58, 75, 0.22); overflow: hidden; zoom: var(--sos-zoom); }
 
-.sos-header { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 20px 28px; border-bottom: 1px solid var(--sos-line); background: #f8fcfd; }
+.sos-header { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 20px 28px; border-bottom: 1px solid var(--sos-line); background: #f4f5ed; }
 .sos-header > div:first-child { min-width: 0; }
 .sos-brand, .sos-kicker { color: var(--sos-accent-dark); font-size: 10px; letter-spacing: 1.8px; font-weight: 750; }
 .sos-header h1 { margin: 5px 0 0; color: var(--sos-ink); font-size: 25px; letter-spacing: 0; }
 .sos-header-actions { display: flex; flex: 0 0 auto; gap: 7px; }
-.sos-header-button, .sos-icon-button { border: 1px solid var(--sos-line-strong); background: #ffffff; color: var(--sos-muted); width: 36px; height: 36px; min-width: 44px; min-height: 44px; cursor: pointer; touch-action: manipulation; transition: border-color 140ms ease, color 140ms ease, background-color 140ms ease; }
+.sos-header-button, .sos-icon-button { border: 1px solid var(--sos-line-strong); background: #fbfaf3; color: var(--sos-muted); width: 36px; height: 36px; min-width: 44px; min-height: 44px; cursor: pointer; touch-action: manipulation; transition: border-color 140ms ease, color 140ms ease, background-color 140ms ease; }
 .sos-header-button:hover, .sos-icon-button:hover, .sos-header-button:focus-visible, .sos-icon-button:focus-visible { color: var(--sos-accent-dark); border-color: var(--sos-accent); background: var(--sos-accent-soft); }
 
-.sos-stage-nav { display: flex; gap: 4px; padding: 9px 20px 0; background: #ffffff; border-bottom: 1px solid var(--sos-line); overflow-x: auto; scrollbar-width: thin; scrollbar-color: var(--sos-line-strong) transparent; }
+.sos-stage-nav { display: flex; gap: 4px; padding: 9px 20px 0; background: #fbfaf3; border-bottom: 1px solid var(--sos-line); overflow-x: auto; scrollbar-width: thin; scrollbar-color: var(--sos-line-strong) transparent; }
 .sos-stage-nav button { position: relative; flex: 0 0 auto; min-width: 120px; min-height: 46px; padding: 11px 15px; border: 0; border-bottom: 3px solid transparent; background: transparent; color: var(--sos-muted); cursor: pointer; text-align: left; font-size: 13px; font-weight: 650; white-space: nowrap; transition: color 140ms ease, background-color 140ms ease, border-color 140ms ease; }
 .sos-stage-nav button i { margin-right: 8px; color: var(--sos-blue); }
 .sos-stage-nav button:hover { background: var(--sos-blue-soft); color: var(--sos-ink); }
-.sos-stage-nav button.active { color: var(--sos-accent-dark); border-bottom-color: var(--sos-accent); background: #f7fcfa; }
+.sos-stage-nav button.active { color: var(--sos-accent-dark); border-bottom-color: var(--sos-accent); background: #f1f5ef; }
 .sos-stage-nav button.active i { color: var(--sos-accent); }
 .sos-stage-nav button.complete:not(.active) { color: var(--sos-blue); }
 
-.sos-main { min-height: 0; overflow-y: auto; overscroll-behavior: contain; overflow-anchor: none; scroll-behavior: auto; -webkit-overflow-scrolling: touch; padding: 30px 34px 42px; background: #ffffff; }
+.sos-main { min-height: 0; overflow-y: auto; overscroll-behavior: contain; overflow-anchor: none; scroll-behavior: auto; -webkit-overflow-scrolling: touch; padding: 30px 34px 42px; background: #f8f7ef; }
 .sos-section-intro { max-width: 850px; margin-bottom: 25px; }
 .sos-section-intro h2 { margin: 6px 0 8px; color: var(--sos-ink); font-size: 23px; letter-spacing: 0; }
 .sos-section-intro p { margin: 0; color: var(--sos-muted); line-height: 1.65; }
@@ -70,32 +70,32 @@
 .sos-diagnostics summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; cursor: pointer; color: var(--sos-ink); font-size: 13px; font-weight: 700; }
 .sos-diagnostics summary small { color: var(--sos-muted); font-size: 11px; font-weight: 400; text-align: right; }
 .sos-diagnostics-body { display: grid; gap: 10px; padding: 0 13px 13px; }
-.sos-continuation { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 18px; padding: 12px 13px; border: 1px solid #e7d5b6; border-left: 3px solid var(--sos-warning); border-radius: 6px; background: #fffaf1; color: var(--sos-ink); }
+.sos-continuation { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 18px; padding: 12px 13px; border: 1px solid #dfd2b9; border-left: 3px solid var(--sos-warning); border-radius: 6px; background: #f7f2e6; color: var(--sos-ink); }
 .sos-continuation strong { color: var(--sos-warning); font-size: 13px; }
 .sos-continuation button { flex: 0 0 auto; min-height: 40px; }
 .sos-diagnostic-block { min-width: 0; }
 .sos-diagnostic-block strong { display: block; margin-bottom: 5px; color: var(--sos-muted); font-size: 11px; }
 .sos-diagnostic-block.error strong { color: var(--sos-danger); }
-.sos-diagnostic-block pre { max-height: 180px; overflow: auto; margin: 0; padding: 9px 10px; border: 1px solid var(--sos-line); border-radius: 4px; background: #f8fbfc; color: #3c5365; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.sos-diagnostic-block pre { max-height: 180px; overflow: auto; margin: 0; padding: 9px 10px; border: 1px solid var(--sos-line); border-radius: 4px; background: #f0f1eb; color: #3c5365; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
 
 .sos-config-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-.sos-field { min-width: 0; padding: 15px; border: 1px solid var(--sos-line); border-radius: 6px; background: #fbfdfe; }
+.sos-field { min-width: 0; padding: 15px; border: 1px solid var(--sos-line); border-radius: 6px; background: #fbfaf3; }
 .sos-field-wide { grid-column: 1 / -1; }
 .sos-field > label, .sos-revise > label, .sos-subsection > strong { display: block; margin-bottom: 10px; color: var(--sos-ink); font-size: 13px; font-weight: 750; }
 .sos-field > label::before, .sos-revise > label::before, .sos-subsection > strong::before { display: inline-block; width: 3px; height: 13px; margin-right: 7px; vertical-align: -2px; border-radius: 2px; background: var(--sos-accent); content: ""; }
 .sos-field small { display: block; color: var(--sos-muted); line-height: 1.45; margin-top: 9px; }
 
 .sos-chip-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 7px; max-height: 184px; overflow-y: auto; overscroll-behavior: contain; overflow-anchor: none; scroll-behavior: auto; padding: 2px 3px 8px 2px; scrollbar-width: thin; scrollbar-color: var(--sos-line-strong) transparent; }
-.sos-chip, .sos-segment button { min-width: 0; min-height: 40px; padding: 7px 9px; border: 1px solid var(--sos-line); background: #ffffff; color: var(--sos-muted); cursor: pointer; font-size: 12px; line-height: 1.25; overflow-wrap: anywhere; touch-action: manipulation; transition: border-color 140ms ease, color 140ms ease, background-color 140ms ease, box-shadow 140ms ease; }
+.sos-chip, .sos-segment button { min-width: 0; min-height: 40px; padding: 7px 9px; border: 1px solid var(--sos-line); background: #fbfaf3; color: var(--sos-muted); cursor: pointer; font-size: 12px; line-height: 1.25; overflow-wrap: anywhere; touch-action: manipulation; transition: border-color 140ms ease, color 140ms ease, background-color 140ms ease, box-shadow 140ms ease; }
 .sos-chip { width: 100%; text-align: left; }
-.sos-chip:hover, .sos-segment button:hover, .sos-chip:focus-visible, .sos-segment button:focus-visible { border-color: #8fcab5; color: var(--sos-accent-dark); background: #f4fbf8; }
-.sos-chip.selected, .sos-segment button.selected { color: var(--sos-accent-dark); background: var(--sos-accent-soft); border-color: #8fcab5; box-shadow: inset 3px 0 0 var(--sos-accent); font-weight: 700; }
+.sos-chip:hover, .sos-segment button:hover, .sos-chip:focus-visible, .sos-segment button:focus-visible { border-color: #9dbcae; color: var(--sos-accent-dark); background: #f0f5ef; }
+.sos-chip.selected, .sos-segment button.selected { color: var(--sos-accent-dark); background: var(--sos-accent-soft); border-color: #9dbcae; box-shadow: inset 3px 0 0 var(--sos-accent); font-weight: 700; }
 .sos-segment { display: flex; flex-wrap: wrap; gap: 7px; }
 .sos-segment button { flex: 1 1 auto; }
 
-#sos-overlay textarea, #sos-overlay input, #sos-overlay select { box-sizing: border-box; width: 100%; border: 1px solid var(--sos-line-strong); border-radius: 5px; background: #ffffff; color: var(--sos-ink); padding: 10px 11px; }
+#sos-overlay textarea, #sos-overlay input, #sos-overlay select { box-sizing: border-box; width: 100%; border: 1px solid var(--sos-line-strong); border-radius: 5px; background: #fbfaf3; color: var(--sos-ink); padding: 10px 11px; }
 #sos-overlay textarea::placeholder, #sos-overlay input::placeholder { color: #94a4b0; }
-#sos-overlay textarea:focus, #sos-overlay input:focus, #sos-overlay select:focus { outline: 2px solid rgba(45, 155, 120, 0.18); border-color: var(--sos-accent); }
+#sos-overlay textarea:focus, #sos-overlay input:focus, #sos-overlay select:focus { outline: 2px solid rgba(91, 154, 125, 0.18); border-color: var(--sos-accent); }
 #sos-overlay select { min-height: 40px; padding: 9px 11px; }
 .sos-field textarea { min-height: 66px; margin-top: 8px; resize: vertical; }
 
@@ -109,7 +109,7 @@
 .sos-import-list span { padding: 6px 9px; border: 1px solid #cfe6dc; border-radius: 5px; background: #f2faf6; color: var(--sos-accent-dark); font-size: 12px; }
 .sos-import-list em { font-size: 12px; }
 .sos-remove-import { border: 0; background: none; color: var(--sos-muted); cursor: pointer; }
-.sos-file-button { display: inline-flex; gap: 8px; align-items: center; padding: 9px 12px; border: 1px solid var(--sos-line-strong); border-radius: 5px; background: #ffffff; color: var(--sos-muted); cursor: pointer; font-size: 12px; }
+.sos-file-button { display: inline-flex; gap: 8px; align-items: center; padding: 9px 12px; border: 1px solid var(--sos-line-strong); border-radius: 5px; background: #fbfaf3; color: var(--sos-muted); cursor: pointer; font-size: 12px; }
 .sos-file-button:hover { color: var(--sos-blue); border-color: #8eb4d6; background: var(--sos-blue-soft); }
 
 .sos-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 27px; }
@@ -118,11 +118,11 @@
 .sos-actions button i { margin-right: 7px; }
 .sos-primary { background: var(--sos-accent); color: #ffffff; border-color: var(--sos-accent) !important; }
 .sos-primary:hover:not(:disabled) { background: var(--sos-accent-dark); }
-.sos-secondary { background: #ffffff; color: var(--sos-blue); }
+.sos-secondary { background: #fbfaf3; color: var(--sos-blue); }
 .sos-secondary:hover:not(:disabled) { border-color: #8eb4d6; background: var(--sos-blue-soft); }
 .sos-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
 
-.sos-persona-box, .sos-outline-box { background: #fbfdfe; border: 1px solid var(--sos-line); border-radius: 6px; padding: 18px; }
+.sos-persona-box, .sos-outline-box { background: #fbfaf3; border: 1px solid var(--sos-line); border-radius: 6px; padding: 18px; }
 .sos-persona-box textarea { min-height: 300px; border: 0; padding: 0; background: transparent; resize: vertical; }
 .sos-persona-meta { border-top: 1px solid var(--sos-line); padding-top: 12px; margin-top: 12px; color: var(--sos-muted); font-size: 12px; }
 .sos-ok { color: var(--sos-accent-dark); }
@@ -135,7 +135,7 @@
 .sos-revise textarea { min-height: 88px; resize: vertical; }
 
 .sos-npc-list { display: grid; gap: 14px; }
-.sos-npc-card { border: 1px solid var(--sos-line); border-left: 3px solid var(--sos-blue); border-radius: 6px; background: #fbfdfe; padding: 16px; }
+.sos-npc-card { border: 1px solid var(--sos-line); border-left: 3px solid var(--sos-blue); border-radius: 6px; background: #fbfaf3; padding: 16px; }
 .sos-npc-card.disabled { border-left-color: var(--sos-line-strong); opacity: 0.62; }
 .sos-npc-card header { display: flex; gap: 10px; margin-bottom: 14px; align-items: center; }
 .sos-npc-card header input { font-weight: 750; font-size: 17px; }
@@ -145,10 +145,12 @@
 .sos-npc-field textarea { min-height: 78px; resize: vertical; }
 
 .sos-story-status { display: flex; flex-wrap: wrap; gap: 18px; padding: 15px; border: 1px solid #cfe1eb; border-left: 3px solid var(--sos-blue); border-radius: 6px; background: var(--sos-blue-soft); color: var(--sos-muted); font-size: 13px; }
-.sos-footer { display: flex; justify-content: space-between; gap: 12px; padding: 10px 20px; border-top: 1px solid var(--sos-line); background: #f8fcfd; color: var(--sos-muted); font-size: 11px; }
-.sos-wand-button { cursor: pointer; pointer-events: auto; }
+.sos-footer { display: flex; justify-content: space-between; gap: 12px; padding: 10px 20px; border-top: 1px solid var(--sos-line); background: #f4f5ed; color: var(--sos-muted); font-size: 11px; }
+.sos-wand-button { width: auto !important; min-width: 190px; height: auto !important; min-height: 30px; justify-content: flex-start !important; gap: 8px; cursor: pointer; pointer-events: auto; white-space: nowrap; }
+.sos-wand-button i { width: 20px; flex: 0 0 20px; }
+.sos-wand-button span { overflow: hidden; text-overflow: ellipsis; }
 
-.sos-restore-button { display: none; position: fixed; right: calc(14px + env(safe-area-inset-right)); bottom: calc(14px + env(safe-area-inset-bottom)); z-index: 10001; width: 46px; height: 46px; min-width: 44px; min-height: 44px; border: 1px solid var(--sos-accent); border-radius: 6px; background: #ffffff; color: var(--sos-accent-dark); box-shadow: 0 8px 24px rgba(26, 58, 75, 0.2); cursor: pointer; pointer-events: auto; touch-action: manipulation; }
+.sos-restore-button { display: none; position: fixed; right: calc(14px + env(safe-area-inset-right)); bottom: calc(14px + env(safe-area-inset-bottom)); z-index: 10001; width: 46px; height: 46px; min-width: 44px; min-height: 44px; border: 1px solid var(--sos-accent); border-radius: 6px; background: #fbfaf3; color: var(--sos-accent-dark); box-shadow: 0 8px 24px rgba(26, 58, 75, 0.2); cursor: pointer; pointer-events: auto; touch-action: manipulation; }
 .sos-switch { display: inline-flex; align-items: center; gap: 9px; min-height: 40px; color: var(--sos-ink); cursor: pointer; }
 
 /* Keep the check mark readable on the light theme in every browser. */
@@ -160,14 +162,14 @@
     margin: 0;
     border: 1px solid #78909d;
     border-radius: 4px;
-    background: #ffffff;
+    background: #fbfaf3;
     cursor: pointer;
     accent-color: var(--sos-accent);
 }
 
 #sos-overlay input[type="checkbox"]:checked {
     border-color: #4f6673;
-    background-color: #ffffff;
+    background-color: #fbfaf3;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5 6.3 12 13 4.5' fill='none' stroke='%2317324a' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
     background-position: center;
     background-repeat: no-repeat;
@@ -175,7 +177,7 @@
 }
 
 #sos-overlay input[type="checkbox"]:hover { border-color: var(--sos-accent-dark); }
-#sos-overlay input[type="checkbox"]:focus-visible { outline: 2px solid rgba(45, 155, 120, 0.28); outline-offset: 2px; }
+#sos-overlay input[type="checkbox"]:focus-visible { outline: 2px solid rgba(91, 154, 125, 0.28); outline-offset: 2px; }
 #sos-overlay input[type="checkbox"]:disabled { cursor: not-allowed; opacity: 0.5; }
 #sos-overlay input[type="checkbox"]:checked + span { color: var(--sos-ink); }
 #sos-overlay.minimized .sos-restore-button { display: flex; align-items: center; justify-content: center; }
