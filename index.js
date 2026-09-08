@@ -2,6 +2,7 @@ const EXTENSION_ID = 'story-outline-studio';
 const METADATA_KEY = 'storyOutlineStudio';
 const CHAT_WORLD_INFO_KEY = 'world_info';
 const PROMPT_KEY = 'story-outline-studio-continuity';
+const EMBEDDED_CHARACTER_BOOK_KEY = '__story_outline_character_book__';
 const VERSION = 17;
 
 // Load core modules after the extension script itself has been evaluated. This
@@ -632,6 +633,7 @@ function defaultState() {
         outlineGenerationHistory: [],
         npcs: [],
         npcsAccepted: false,
+        npcSource: 'generate',
         npcNameHistory: [],
         storyId: '',
         importedCharacterReferences: [],
@@ -691,6 +693,7 @@ function getState() {
         ? next.outlineGenerationHistory.map(item => normalizeOutlineData(item)).filter(item => outlineSignature(item))
         : [];
     next.npcNameHistory = unique(next.npcNameHistory);
+    next.npcSource = next.npcSource === 'worldbook' ? 'worldbook' : 'generate';
     next.trackedStoryMessageKeys = Array.isArray(next.trackedStoryMessageKeys)
         ? unique(next.trackedStoryMessageKeys).slice(-200)
         : [];
@@ -1442,10 +1445,17 @@ function outlineMarkup() {
     const hasOutline = text(state.outline);
     const length = LENGTHS[state.config.length] || LENGTHS.short;
     const hasAcceptedNpcs = state.npcs.length > 0 && state.npcsAccepted;
-    return `<div class="sos-section-intro"><span class="sos-kicker">03 / OUTLINE</span><h2>审核剧情大纲</h2><p>故事篇幅：${length.label}。这是节奏和推进密度的倾向，不设本地硬字数上限；AI 必须完整写出开端、发展、转折、高潮、结局、因果链和结局方向。${hasAcceptedNpcs ? '当前已有已接受的 NPC；确认大纲后会直接沿用，不会重新生成 NPC。' : '接受后会用于生成 NPC 和剧情。'}重 roll 或修改会生成新版本，已完成剧情不会回写。</p></div>${generationDiagnosticsMarkup()}
+    const worldBookNpcSource = state.npcSource === 'worldbook';
+    const npcSourceDescription = worldBookNpcSource
+        ? '确认大纲后会直接使用角色卡绑定/内置世界书中的已启用条目，不会调用 NPC 生成接口。'
+        : hasAcceptedNpcs
+            ? '当前已有已接受的 NPC；确认大纲后会直接沿用，不会重新生成 NPC。'
+            : '确认大纲后会调用 AI 生成 NPC。';
+    return `<div class="sos-section-intro"><span class="sos-kicker">03 / OUTLINE</span><h2>审核剧情大纲</h2><p>故事篇幅：${length.label}。这是节奏和推进密度的倾向，不设本地硬字数上限；AI 必须完整写出开端、发展、转折、高潮、结局、因果链和结局方向。${npcSourceDescription}重 roll 或修改会生成新版本，已完成剧情不会回写。</p></div>${generationDiagnosticsMarkup()}
+        <div class="sos-field sos-field-wide sos-npc-source-picker"><label>主要 NPC 来源</label><div class="sos-segment" data-setting="npcSource"><button type="button" class="${!worldBookNpcSource ? 'selected' : ''}" data-action="set-npc-source" data-value="generate"><i class="fa-solid fa-wand-magic-sparkles"></i> AI 生成 NPC</button><button type="button" class="${worldBookNpcSource ? 'selected' : ''}" data-action="set-npc-source" data-value="worldbook"><i class="fa-solid fa-book"></i> 使用角色卡世界书 NPC</button></div><small>${worldBookNpcSource ? '只参考当前角色卡绑定的外部世界书、角色卡内置 character_book 以及已选择的参考世界书中的已启用条目；关闭条目不会发送给 AI。' : '适合角色卡没有现成 NPC，或你希望由当前大纲重新设计 NPC 的情况。'}</small></div>
         <div class="sos-outline-box ${hasOutline ? '' : 'empty'}">${hasOutline ? `<div class="sos-version">版本 ${state.outlineVersion} · ${state.outline.length} 字</div><textarea id="sos-outline-editor" class="sos-outline-editor" aria-label="剧情大纲">${escapeHtml(state.outline)}</textarea>` : '<i>还没有大纲。回到配置页生成一份。</i>'}</div>
         <div class="sos-revise"><label>修改意见</label><textarea id="sos-outline-feedback" placeholder="例如：把第三幕改成 user 主动救 NPC，保留已完成部分，只调整后续走向"></textarea></div>
-        <div class="sos-actions"><button type="button" class="sos-secondary" data-action="save-outline" ${hasOutline ? '' : 'disabled'}><i class="fa-solid fa-floppy-disk"></i> 保存编辑后的大纲</button><button type="button" class="sos-secondary" data-action="reroll-outline"><i class="fa-solid fa-dice"></i> 直接重 roll</button><button type="button" class="sos-secondary" data-action="revise-outline"><i class="fa-solid fa-pen"></i> 按意见重写</button><button type="button" class="sos-primary" data-action="accept-outline" ${hasOutline ? '' : 'disabled'}><i class="fa-solid fa-check"></i> ${hasAcceptedNpcs ? '确认大纲并继续剧情' : '接受大纲并生成 NPC'}</button></div>`;
+        <div class="sos-actions"><button type="button" class="sos-secondary" data-action="save-outline" ${hasOutline ? '' : 'disabled'}><i class="fa-solid fa-floppy-disk"></i> 保存编辑后的大纲</button><button type="button" class="sos-secondary" data-action="reroll-outline"><i class="fa-solid fa-dice"></i> 直接重 roll</button><button type="button" class="sos-secondary" data-action="revise-outline"><i class="fa-solid fa-pen"></i> 按意见重写</button><button type="button" class="sos-primary" data-action="accept-outline" ${hasOutline ? '' : 'disabled'}><i class="fa-solid fa-check"></i> ${worldBookNpcSource ? '确认大纲并使用角色卡 NPC' : hasAcceptedNpcs ? '确认大纲并继续剧情' : '接受大纲并生成 NPC'}</button></div>`;
 }
 
 function saveEditedOutline() {
@@ -1652,6 +1662,7 @@ function bindPanelEvents() {
     panel.querySelectorAll('.sos-segment button').forEach(button => button.addEventListener('click', () => {
         setCustomValues();
         const setting = button.parentElement.dataset.setting;
+        if (setting === 'npcSource') return handleAction('set-npc-source', button);
         state.config[setting] = button.dataset.value;
         saveState();
         rerender();
@@ -1756,6 +1767,15 @@ async function handleAction(action, button) {
     }
     setCustomValues();
     if (action === 'continue-structured') return continueStructuredGeneration();
+    if (action === 'set-npc-source') {
+        const source = button?.dataset?.value === 'worldbook' ? 'worldbook' : 'generate';
+        const previousSource = state.npcSource;
+        state.npcSource = source;
+        if (source !== previousSource) state.npcsAccepted = false;
+        saveState();
+        rerender();
+        return;
+    }
     if (action === 'generate-outline') return startOutline();
     if (action === 'generate-persona') return generatePersona();
     if (action === 'reroll-persona') return generatePersona();
@@ -1841,7 +1861,9 @@ function getCharacterExtraWorldBookNames() {
 function getCurrentCharacterBook() {
     refreshContext();
     const character = hasCurrentCharacter() ? ctx.characters[ctx.characterId] : null;
-    const book = character?.data?.character_book;
+    const book = character?.data?.character_book
+        || character?.character_book
+        || character?.data?.extensions?.character_book;
     if (!book) return null;
     try { return normalizeWorldBookData(book); } catch { return null; }
 }
@@ -1850,6 +1872,7 @@ function linkedReferenceWorldBookNames() {
     const names = [];
     const characterBook = characterBoundWorldBookName();
     if (characterBook) names.push(characterBook);
+    names.push(...getCharacterExtraWorldBookNames());
     const chatBook = text(ctx.chatMetadata?.[CHAT_WORLD_INFO_KEY]);
     if (chatBook) names.push(chatBook);
     return unique(names);
@@ -1895,15 +1918,65 @@ async function ensureReferenceWorldBookLoaded() {
     const explicit = explicitReferenceWorldBookName();
     const linked = linkedReferenceWorldBookNames();
     const names = unique([...(explicit ? [explicit] : []), ...linked]);
-    if (!names.length) {
+    const embedded = getCurrentCharacterBook();
+    if (!names.length && !embedded) {
         loadedReferenceWorldBooks = new Map();
         return;
     }
+    if (embedded) loadedReferenceWorldBooks.set(EMBEDDED_CHARACTER_BOOK_KEY, embedded);
     for (const name of names) {
         if (loadedReferenceWorldBooks.has(name)) continue;
         const data = normalizeWorldBookData(await loadWorldInfo(name));
         loadedReferenceWorldBooks.set(name, data);
     }
+}
+
+function hasWorldBookNpcSource() {
+    if (state?.npcSource !== 'worldbook') return false;
+    const embedded = loadedReferenceWorldBooks.get(EMBEDDED_CHARACTER_BOOK_KEY);
+    if (Object.values(embedded?.entries || {}).some(isWorldBookEntryEnabled)) return true;
+    for (const [name, book] of loadedReferenceWorldBooks.entries()) {
+        if (name !== EMBEDDED_CHARACTER_BOOK_KEY && Object.values(book?.entries || {}).some(isWorldBookEntryEnabled)) return true;
+    }
+    return false;
+}
+
+function activeWorldBookEntries() {
+    if (state?.npcSource !== 'worldbook') return [];
+    const sources = [];
+    // Reopened chats may reach the native generation pipeline before the
+    // asynchronous world-info preload finishes. The embedded card book is
+    // already present in the character object, so use it synchronously as a
+    // fallback instead of sending an empty NPC context on the first turn.
+    const embedded = loadedReferenceWorldBooks.get(EMBEDDED_CHARACTER_BOOK_KEY) || getCurrentCharacterBook();
+    if (embedded) sources.push(['角色卡内置 character_book', embedded]);
+    const names = unique([explicitReferenceWorldBookName(), ...linkedReferenceWorldBookNames()]);
+    for (const name of names) {
+        const book = loadedReferenceWorldBooks.get(name);
+        if (book) sources.push([name, book]);
+    }
+    const seen = new Set();
+    const result = [];
+    for (const [sourceName, book] of sources) {
+        for (const entry of Object.values(book?.entries || {})) {
+            if (!isWorldBookEntryEnabled(entry) || !text(entry?.content)) continue;
+            const keys = unique([...asList(entry?.key), ...asList(entry?.keysecondary)]);
+            const identity = `${sourceName}\u0000${text(entry?.uid)}\u0000${keys.join('|')}\u0000${text(entry?.content)}`;
+            if (seen.has(identity)) continue;
+            seen.add(identity);
+            result.push({ sourceName, keys, comment: text(entry?.comment), content: text(entry?.content) });
+        }
+    }
+    return result;
+}
+
+function activeWorldBookNpcContext() {
+    const entries = activeWorldBookEntries();
+    if (!entries.length) return '暂无已启用的角色卡/绑定世界书条目。';
+    return entries.map((entry, index) => {
+        const label = entry.comment || entry.keys.join('、') || `条目 ${index + 1}`;
+        return `[${entry.sourceName}] ${label}${entry.keys.length ? `（关键词：${entry.keys.join('、')}）` : ''}\n${limitPromptText(entry.content, 1800)}`;
+    }).join('\n\n');
 }
 
 async function selectReferenceWorldBook(name) {
@@ -1963,7 +2036,7 @@ function referenceBooksText() {
         const entries = [];
         for (const entry of book.entries) {
             if (!isWorldBookEntryEnabled(entry)) continue;
-            if (isStoryNpcEntry(entry)) continue;
+            if (isStoryNpcEntry(entry) && state.npcSource !== 'worldbook') continue;
             const remaining = maxTotal - used;
             if (remaining <= 0) break;
             const contentLimit = Math.max(120, Math.min(1800, remaining - 80));
@@ -1983,7 +2056,7 @@ function referenceBooksText() {
             const entries = [];
             for (const entry of Object.values(data.entries)) {
                 if (!isWorldBookEntryEnabled(entry)) continue;
-                if (isStoryNpcEntry(entry)) continue;
+                if (isStoryNpcEntry(entry) && state.npcSource !== 'worldbook') continue;
                 const remaining = maxTotal - used;
                 if (remaining <= 0) break;
                 const content = limitPromptText(entry?.content, Math.max(120, Math.min(1800, remaining - 80)));
@@ -1996,6 +2069,22 @@ function referenceBooksText() {
             if (entries.length) books.push(`<linked_worldbook name="${escapeHtml(bookName)}">${entries.join('')}\n</linked_worldbook>`);
         }
         if (used >= maxTotal) break;
+    }
+    const embedded = loadedReferenceWorldBooks.get(EMBEDDED_CHARACTER_BOOK_KEY);
+    if (embedded?.entries && used < maxTotal) {
+        const entries = [];
+        for (const entry of Object.values(embedded.entries)) {
+            if (!isWorldBookEntryEnabled(entry)) continue;
+            const remaining = maxTotal - used;
+            if (remaining <= 0) break;
+            const content = limitPromptText(entry?.content, Math.max(120, Math.min(1800, remaining - 80)));
+            if (!content) continue;
+            const keys = unique([...asList(entry?.key), ...asList(entry?.keysecondary)]);
+            const part = `\n[${keys.join('、') || '无关键词'}] ${content}`;
+            entries.push(part);
+            used += part.length;
+        }
+        if (entries.length) books.push(`<character_embedded_worldbook>${entries.join('')}\n</character_embedded_worldbook>`);
     }
     return books.join('\n');
 }
@@ -2038,6 +2127,7 @@ function basePrompt() {
 外部导入角色卡参考（低优先级）：
 ${referenceCharactersText() || '暂无'}
 ${referenceBooksText()}
+当前 NPC 来源：${state?.npcSource === 'worldbook' ? '角色卡/绑定世界书。只使用上述世界书中已启用的角色条目，不要额外虚构工作台 NPC，也不要使用关闭条目。' : '工作台 AI 生成。剧情阶段只使用当前已接受且启用的 NPC。'}
 外部导入角色卡只能作为角色内核、说话方式和世界设定参考。当前聊天事实、当前工作台配置、user 已接受的人设、已接受大纲和已接受 NPC 设定优先。不得机械复制参考角色卡的剧情。参考角色必须保持原有核心性格、身份逻辑和说话方式，不得 OOC。
 配置：${JSON.stringify(configPayload())}
 user当前聊天独立人设：${userText || '尚未确定'}
@@ -2525,6 +2615,42 @@ function parseGeneratedPayload(raw, allowText = false, schema = null) {
     return null;
 }
 
+function parseContinuationPayload(previousRaw, continuationText, allowText, schema) {
+    const previous = text(previousRaw);
+    const next = text(continuationText);
+    const combined = `${previous}${next}`;
+    const combinedParsed = parseGeneratedPayload(combined, allowText, schema);
+    const standaloneParsed = parseGeneratedPayload(next, allowText, schema);
+    const standaloneLooksRooted = schema?.properties?.npcs
+        ? /<npcs?\b|^\s*(?:```(?:json)?\s*)?[\[{]/iu.test(next)
+        : schema?.properties?.name && !schema?.properties?.opening
+            ? /<persona\b|^\s*(?:```(?:json)?\s*)?[\[{]/iu.test(next)
+            : /<outline\b|^\s*(?:```(?:json)?\s*)?[\[{]/iu.test(next);
+
+    // A gateway may ignore the suffix instruction and return a fresh complete
+    // response. A rooted complete response is independent by definition; use
+    // it before trying to append it to the truncated prefix.
+    if (standaloneLooksRooted && standaloneParsed && hasGeneratedShape(standaloneParsed, schema)
+        && !isLikelyTruncatedResponse(next, standaloneParsed, schema)) {
+        return { raw: next, parsed: standaloneParsed };
+    }
+    if (combinedParsed && hasGeneratedShape(combinedParsed, schema)
+        && !isLikelyTruncatedResponse(combined, combinedParsed, schema)) {
+        return { raw: combined, parsed: combinedParsed };
+    }
+
+    // Some gateways ignore the instruction to continue after the last
+    // character and return a fresh complete tagged/JSON result. In that case
+    // concatenating the two responses creates duplicate roots and prevents
+    // import. Prefer the standalone complete response only when it parses as
+    // a complete result; normal suffix-only continuation still uses combined.
+    if (standaloneParsed && hasGeneratedShape(standaloneParsed, schema)
+        && !isLikelyTruncatedResponse(next, standaloneParsed, schema)) {
+        return { raw: next, parsed: standaloneParsed };
+    }
+    return { raw: combined, parsed: combinedParsed };
+}
+
 function generatedErrorMessage(error) {
     const seen = new Set();
     const read = (value, depth = 0) => {
@@ -2659,7 +2785,13 @@ async function generateJson(prompt, schema, responseLength = 1200, { allowText =
         saveGenerationSnapshot(kind, { raw, error: wrapped.message });
         throw wrapped;
     }
-    let parsed = parseGeneratedPayload(raw, allowText, schema);
+    if (continuationRaw) {
+        const resolved = parseContinuationPayload(continuationRaw, continuationText, allowText, schema);
+        raw = resolved.raw;
+        var parsed = resolved.parsed;
+    } else {
+        var parsed = parseGeneratedPayload(raw, allowText, schema);
+    }
     const truncated = isLikelyTruncatedResponse(raw, parsed, schema);
     if (truncated) {
         saveContinuation(kind, raw, prompt, schema, responseLength, { allowText, patchTag, continuationMeta });
@@ -2773,7 +2905,7 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
     }
 
     const continuationText = text(generated?.mes);
-    const raw = continuationRaw ? `${continuationRaw}${continuationText}` : continuationText;
+    let raw = continuationRaw ? `${continuationRaw}${continuationText}` : continuationText;
     if (!generated || !raw) {
         const error = new Error('酒馆请求已完成，但没有写入结构化草稿消息。请检查 API 响应和酒馆控制台。');
         saveGenerationSnapshot(kind, { error: error.message });
@@ -2789,7 +2921,16 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
         saveGenerationSnapshot(kind, { raw, error: wrapped.message });
         throw wrapped;
     }
-    const parsed = parseGeneratedPayload(raw, allowText, schema);
+    let resolvedRaw = raw;
+    let parsed;
+    if (continuationRaw) {
+        const resolved = parseContinuationPayload(continuationRaw, continuationText, allowText, schema);
+        resolvedRaw = resolved.raw;
+        parsed = resolved.parsed;
+    } else {
+        parsed = parseGeneratedPayload(raw, allowText, schema);
+    }
+    if (resolvedRaw !== raw) raw = resolvedRaw;
     const truncated = isLikelyTruncatedResponse(raw, parsed, schema);
     if (truncated) {
         saveContinuation(kind, raw, prompt, schema, 12000, { allowText, patchTag, continuationMeta });
@@ -3055,6 +3196,23 @@ async function acceptOutline() {
     if (!text(state.outline)) return;
     state.outlineAccepted = true;
     saveState();
+    if (state.npcSource === 'worldbook') {
+        await withGenerating(async () => {
+            await ensureReferenceWorldBookLoaded();
+            if (!hasWorldBookNpcSource()) {
+                state.outlineAccepted = false;
+                saveState();
+                throw new Error('当前角色卡或已选择的世界书没有可用的已启用条目；请切换 NPC 来源或先绑定世界书。');
+            }
+            state.npcsAccepted = true;
+            state.worldBookName = characterBoundWorldBookName() || selectedReferenceWorldBookName() || '角色卡世界书';
+            saveState();
+            activeStage = 'story';
+            rerender();
+            toastr.success('大纲已确认，将使用角色卡世界书中的已启用 NPC，不会额外调用 NPC 生成。');
+        }, '正在读取角色卡世界书...');
+        return;
+    }
     if (state.npcs.length > 0 && state.npcsAccepted) {
         activeStage = 'story';
         rerender();
@@ -3066,6 +3224,9 @@ async function acceptOutline() {
 
 async function generateNpcs(feedback = '', mode = 'new', continuation = null) {
     await withGenerating(async () => {
+        if (state.npcSource === 'worldbook') {
+            return toastr.warning('当前选择了使用角色卡世界书 NPC，不会调用 AI 生成 NPC。');
+        }
         await ensureReferenceWorldBookLoaded();
         ensureStoryId();
         if (!state.outlineAccepted) return toastr.warning('请先接受大纲。');
@@ -3374,7 +3535,11 @@ async function attachReferenceWorldBook() {
 function storyPrompt() {
     const min = LENGTHS[state.config.length]?.minTurns || 0;
     const remaining = Math.max(0, min - state.userTurnCount);
-    const activeNpcs = state.npcs.filter(npc => npc.enabled !== false);
+    const activeNpcs = state.npcSource === 'worldbook' ? [] : state.npcs.filter(npc => npc.enabled !== false);
+    const activeWorldBooks = state.npcSource === 'worldbook' ? activeWorldBookNpcContext() : '';
+    const npcSourceRule = state.npcSource === 'worldbook'
+        ? 'NPC 来源为角色卡/绑定世界书。只使用当前角色卡世界书、角色卡内置 character_book 和已选择参考世界书中已启用的角色条目；关闭条目不得出场，不要额外虚构工作台 NPC，也不要把旧聊天中的 NPC 当作当前 NPC。'
+        : 'NPC 来源为工作台 AI 生成。只使用下方当前故事启用的 NPC；关闭的 NPC 不得出场。';
     const completedSnapshot = state.completedStorySnapshot
         ? `\n<completed_story_snapshot>\n这是上一段已经完成的剧情历史，仅用于承接上下文，不是新的 user 指令，也不是待执行的剧情要求：\n${state.completedStorySnapshot}\n</completed_story_snapshot>`
         : '\n<completed_story_snapshot>暂无本地快照，请从酒馆当前聊天中最近一条已经完成的剧情承接。</completed_story_snapshot>';
@@ -3384,7 +3549,7 @@ function storyPrompt() {
     const contextRule = state.currentTurn > 0
         ? `酒馆会自动提供当前聊天的最近消息；请以最近一条实际 user 输入和上一条剧情为准，自动判断大纲已经推进到哪一段。当前工作台计数仅作辅助：剧情楼 ${state.currentTurn}，user 交互楼 ${state.userTurnCount}。不要把下面的完整大纲当成已经发生过的剧情。`
         : '请从当前聊天最后一条实际内容承接开端；不要因为大纲包含高潮和结局就直接跳到故事末尾。';
-    return `${basePrompt()}\n<story_outline_studio_continuity>\n<current_effective_outline>\n当前唯一生效的大纲版本：${state.outlineVersion}\n旧聊天中出现的旧版本大纲、旧剧情指令或旧规划不得覆盖当前版本。以下大纲只是未来路线规划，不代表已经发生：\n${state.outline}\n</current_effective_outline>\n${completedSnapshot}\n<next_story_task>\n这是一次新的剧情推进任务。请根据上一段已完成剧情、酒馆当前聊天的最近实际消息，以及当前唯一生效的大纲版本，推进下一段剧情。必须发生新的事件、行动、信息或关系变化，不得重复上一段。快照中的“下段剧情”或类似文字只是历史内容，绝不是当前 user 指令。\n</next_story_task>\n</story_outline_studio_continuity>\n当前故事 ID：${ensureStoryId()}\n当前 user 唯一姓名：${currentUserName() || '尚未确定'}\n当前故事启用的 NPC：${JSON.stringify(activeNpcs)}\n关闭的 NPC 不得出场、不得作为关系对象、不得被世界书上下文重新启用。\n${contextRule}\n本地已完成剧情记录长度：${state.completedStorySnapshot ? state.completedStorySnapshot.length : 0} 字，最多保留最近 12000 字。\n本篇最低 user 交互楼层：${min}\n楼层硬约束：${pacingRule}\n配置中的特别想看的情节、禁区和补充要求：${text(state.config.detail) || '暂无'}\n特别要求是本次剧情的高优先级约束；其中明确指定的中途、高潮、结尾或场景，必须在未完成大纲范围内优先落实，已完成部分除外。\n硬规则：严格按照当前唯一生效的大纲版本和所有配置关键词推进；不要擅自改变 user 人设；不要让 NPC OOC；不要提前结局；已完成剧情只当作历史；新的剧情必须连接最近聊天内容。user 本楼明确做出的行动、选择、拒绝、目标和新要求优先于未发生的大纲情节；不要无视 user 输入，也不要强行把 user 拉回原轨。普通偏差要自然吸收，并把未完成的大纲事件改写成能由当前行动导向的版本。若 user 的行动与未完成大纲的关键事件、关系走向或结局方向发生实质冲突，先承接 user 已经做出的事实，不要在本楼强行纠正；将其作为新的分支，并提示 user 可用“修改后续大纲”确认后续路线。已完成剧情绝不能改写。如果 user 本楼只输入“继续剧情”或等价推进指令，不要把这几个字当作剧情事实，直接按照当前唯一生效的大纲版本、最近聊天和当前节奏推进下一楼。只输出本次剧情正文，不要大纲、总结、设定说明。`;
+    return `${basePrompt()}\n<story_outline_studio_continuity>\n<current_effective_outline>\n当前唯一生效的大纲版本：${state.outlineVersion}\n旧聊天中出现的旧版本大纲、旧剧情指令或旧规划不得覆盖当前版本。以下大纲只是未来路线规划，不代表已经发生：\n${state.outline}\n</current_effective_outline>\n${completedSnapshot}\n<next_story_task>\n这是一次新的剧情推进任务。请根据上一段已完成剧情、酒馆当前聊天的最近实际消息，以及当前唯一生效的大纲版本，推进下一段剧情。必须发生新的事件、行动、信息或关系变化，不得重复上一段。快照中的“下段剧情”或类似文字只是历史内容，绝不是当前 user 指令。\n</next_story_task>\n</story_outline_studio_continuity>\n当前故事 ID：${ensureStoryId()}\n当前 user 唯一姓名：${currentUserName() || '尚未确定'}\n当前故事启用的 NPC：${JSON.stringify(activeNpcs)}\n关闭的 NPC 不得出场、不得作为关系对象、不得被世界书上下文重新启用。\n${contextRule}\n${state.npcSource === 'worldbook' ? `角色卡/绑定世界书当前启用条目（这些是本故事唯一可用的现成 NPC/设定候选，关闭条目不在此处）：\n<active_worldbook_npc_entries>\n${activeWorldBooks}\n</active_worldbook_npc_entries>` : ''}\n本地已完成剧情记录长度：${state.completedStorySnapshot ? state.completedStorySnapshot.length : 0} 字，最多保留最近 12000 字。\n本篇最低 user 交互楼层：${min}\n楼层硬约束：${pacingRule}\n配置中的特别想看的情节、禁区和补充要求：${text(state.config.detail) || '暂无'}\n特别要求是本次剧情的高优先级约束；其中明确指定的中途、高潮、结尾或场景，必须在未完成大纲范围内优先落实，已完成部分除外。\n硬规则：严格按照当前唯一生效的大纲版本和所有配置关键词推进；不要擅自改变 user 人设；不要让 NPC OOC；不要提前结局；已完成剧情只当作历史；新的剧情必须连接最近聊天内容。user 本楼明确做出的行动、选择、拒绝、目标和新要求优先于未发生的大纲情节；不要无视 user 输入，也不要强行把 user 拉回原轨。普通偏差要自然吸收，并把未完成的大纲事件改写成能由当前行动导向的版本。若 user 的行动与未完成大纲的关键事件、关系走向或结局方向发生实质冲突，先承接 user 已经做出的事实，不要在本楼强行纠正；将其作为新的分支，并提示 user 可用“修改后续大纲”确认后续路线。已完成剧情绝不能改写。如果 user 本楼只输入“继续剧情”或等价推进指令，不要把这几个字当作剧情事实，直接按照当前唯一生效的大纲版本、最近聊天和当前节奏推进下一楼。只输出本次剧情正文，不要大纲、总结、设定说明。`;
 }
 
 function updateContinuityPrompt() {
@@ -3435,6 +3600,7 @@ function trackReceivedStoryMessage(messageIndex) {
 async function continueStory() {
     await withGenerating(async () => {
         if (!state.outlineAccepted || !state.npcsAccepted) return toastr.warning('请先接受大纲和 NPC。');
+        await ensureReferenceWorldBookLoaded();
         const beforeLength = ctx.chat.length;
         const continuationDirective = '请根据当前有效剧情大纲、上一段已完成剧情和当前聊天上下文，继续下一段剧情。必须推进新的事件，不要重复上一段，也不要进入结局后的后日谈。';
         const continuationUserMessage = {
@@ -3569,6 +3735,9 @@ function installEvents() {
             activeStage = 'config';
         }
         void refreshAvailableWorldBooks(true);
+        void ensureReferenceWorldBookLoaded()
+            .then(() => updateContinuityPrompt())
+            .catch(error => console.warn(`[${EXTENSION_ID}] failed to preload linked world books`, error));
         updateContinuityPrompt();
         if (panel?.classList.contains('open')) rerender();
     });
@@ -3596,6 +3765,11 @@ async function init() {
         activeChatKey = contextCacheKey(ctx);
         state = getState();
         installButton();
+        if (state.outlineAccepted && state.npcsAccepted) {
+            void ensureReferenceWorldBookLoaded()
+                .then(() => updateContinuityPrompt())
+                .catch(error => console.warn(`[${EXTENSION_ID}] failed to preload linked world books`, error));
+        }
     } catch (error) {
         console.error(`[${EXTENSION_ID}] failed to mount`, error);
         return;
