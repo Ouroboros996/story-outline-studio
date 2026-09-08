@@ -1441,10 +1441,11 @@ function personaMarkup() {
 function outlineMarkup() {
     const hasOutline = text(state.outline);
     const length = LENGTHS[state.config.length] || LENGTHS.short;
-    return `<div class="sos-section-intro"><span class="sos-kicker">03 / OUTLINE</span><h2>审核剧情大纲</h2><p>故事篇幅：${length.label}。这是节奏和推进密度的倾向，不设本地硬字数上限；AI 必须完整写出开端、发展、转折、高潮、结局、因果链和结局方向。接受后才会用于生成 NPC 和剧情。重 roll 或修改会生成新版本，已完成剧情不会回写。</p></div>${generationDiagnosticsMarkup()}
+    const hasAcceptedNpcs = state.npcs.length > 0 && state.npcsAccepted;
+    return `<div class="sos-section-intro"><span class="sos-kicker">03 / OUTLINE</span><h2>审核剧情大纲</h2><p>故事篇幅：${length.label}。这是节奏和推进密度的倾向，不设本地硬字数上限；AI 必须完整写出开端、发展、转折、高潮、结局、因果链和结局方向。${hasAcceptedNpcs ? '当前已有已接受的 NPC；确认大纲后会直接沿用，不会重新生成 NPC。' : '接受后会用于生成 NPC 和剧情。'}重 roll 或修改会生成新版本，已完成剧情不会回写。</p></div>${generationDiagnosticsMarkup()}
         <div class="sos-outline-box ${hasOutline ? '' : 'empty'}">${hasOutline ? `<div class="sos-version">版本 ${state.outlineVersion} · ${state.outline.length} 字</div><textarea id="sos-outline-editor" class="sos-outline-editor" aria-label="剧情大纲">${escapeHtml(state.outline)}</textarea>` : '<i>还没有大纲。回到配置页生成一份。</i>'}</div>
         <div class="sos-revise"><label>修改意见</label><textarea id="sos-outline-feedback" placeholder="例如：把第三幕改成 user 主动救 NPC，保留已完成部分，只调整后续走向"></textarea></div>
-        <div class="sos-actions"><button type="button" class="sos-secondary" data-action="save-outline" ${hasOutline ? '' : 'disabled'}><i class="fa-solid fa-floppy-disk"></i> 保存编辑后的大纲</button><button type="button" class="sos-secondary" data-action="reroll-outline"><i class="fa-solid fa-dice"></i> 直接重 roll</button><button type="button" class="sos-secondary" data-action="revise-outline"><i class="fa-solid fa-pen"></i> 按意见重写</button><button type="button" class="sos-primary" data-action="accept-outline" ${hasOutline ? '' : 'disabled'}><i class="fa-solid fa-check"></i> 接受大纲并生成 NPC</button></div>`;
+        <div class="sos-actions"><button type="button" class="sos-secondary" data-action="save-outline" ${hasOutline ? '' : 'disabled'}><i class="fa-solid fa-floppy-disk"></i> 保存编辑后的大纲</button><button type="button" class="sos-secondary" data-action="reroll-outline"><i class="fa-solid fa-dice"></i> 直接重 roll</button><button type="button" class="sos-secondary" data-action="revise-outline"><i class="fa-solid fa-pen"></i> 按意见重写</button><button type="button" class="sos-primary" data-action="accept-outline" ${hasOutline ? '' : 'disabled'}><i class="fa-solid fa-check"></i> ${hasAcceptedNpcs ? '确认大纲并继续剧情' : '接受大纲并生成 NPC'}</button></div>`;
 }
 
 function saveEditedOutline() {
@@ -1472,7 +1473,10 @@ function saveEditedOutline() {
     state.outline = finalOutline;
     state.outlineVersion += 1;
     state.outlineAccepted = false;
-    state.npcsAccepted = false;
+    // Revising the route does not invalidate an already accepted cast. Keep
+    // it available so the user can continue with the new outline without
+    // paying for another NPC generation request.
+    if (!state.npcs.length || !state.npcsAccepted) state.npcsAccepted = false;
     state.lastGeneratedAt = Date.now();
     saveState();
     rerender();
@@ -3031,7 +3035,9 @@ async function generateOutline(feedback = '', mode = 'new', continuation = null)
         }
         state.outlineVersion += 1;
         state.outlineAccepted = false;
-        state.npcsAccepted = false;
+        // An outline revision can reuse the current accepted NPC cast. Only
+        // a missing or unaccepted cast still needs the NPC generation step.
+        if (!state.npcs.length || !state.npcsAccepted) state.npcsAccepted = false;
         state.lastGeneratedAt = Date.now();
         saveState();
         activeStage = 'outline';
@@ -3049,6 +3055,12 @@ async function acceptOutline() {
     if (!text(state.outline)) return;
     state.outlineAccepted = true;
     saveState();
+    if (state.npcs.length > 0 && state.npcsAccepted) {
+        activeStage = 'story';
+        rerender();
+        toastr.success('大纲已确认，沿用当前 NPC，不重新生成。');
+        return;
+    }
     await generateNpcs();
 }
 
