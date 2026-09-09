@@ -2693,10 +2693,9 @@ function findStructuredDraft(token, fallbackIndex = -1) {
 async function replaceStructuredDraft(generated, resolvedRaw, continuation) {
     if (!Array.isArray(ctx?.chat)) return null;
     const token = text(continuation?.draftToken) || text(generated?.extra?.storyOutlineStudioDraft?.token);
-    const original = findStructuredDraft(token, Number(continuation?.draftIndex));
+    const original = continuation?.draftMessage || findStructuredDraft(token, Number(continuation?.draftIndex));
     const target = original || generated;
     if (!target) return null;
-    if (original === generated) return generated;
     target.mes = text(resolvedRaw);
     target.extra = {
         ...(target.extra || {}),
@@ -2707,12 +2706,50 @@ async function replaceStructuredDraft(generated, resolvedRaw, continuation) {
             at: Date.now(),
         },
     };
-    if (generated && generated !== target) {
-        const generatedIndex = ctx.chat.indexOf(generated);
+    // A foreground continuation can make the core append more than one
+    // assistant message while it is saving the response. Keep the original
+    // structured draft as the only message for this request and remove every
+    // generated duplicate, not just the last object reference.
+    const generatedMessages = uniqueObjects([
+        ...(Array.isArray(continuation?.generatedMessages) ? continuation.generatedMessages : []),
+        generated,
+    ]);
+    for (const message of generatedMessages) {
+        if (!message || message === target) continue;
+        const generatedIndex = ctx.chat.indexOf(message);
         if (generatedIndex >= 0) ctx.chat.splice(generatedIndex, 1);
+    }
+
+    // The old draft is removed before a normal foreground request so the
+    // model cannot treat it as an additional chat turn. Restore it to its
+    // original position after the request, including adapters that returned a
+    // detached/recreated chat array.
+    const restoreIndex = Number(continuation?.restoreIndex);
+    if (!ctx.chat.includes(target)) {
+        const insertionIndex = Number.isInteger(restoreIndex) && restoreIndex >= 0
+            ? Math.min(restoreIndex, ctx.chat.length)
+            : ctx.chat.length;
+        ctx.chat.splice(insertionIndex, 0, target);
+    } else if (Number.isInteger(restoreIndex) && restoreIndex >= 0) {
+        const currentIndex = ctx.chat.indexOf(target);
+        if (currentIndex >= 0 && currentIndex !== restoreIndex) {
+            ctx.chat.splice(currentIndex, 1);
+            ctx.chat.splice(Math.min(restoreIndex, ctx.chat.length), 0, target);
+        }
     }
     await ctx.saveChat?.();
     return target;
+}
+
+function uniqueObjects(values) {
+    const result = [];
+    const seen = new Set();
+    for (const value of values) {
+        if (!value || seen.has(value)) continue;
+        seen.add(value);
+        result.push(value);
+    }
+    return result;
 }
 
 async function retainStructuredDraft(raw, kind, token, index = -1) {
@@ -3032,8 +3069,22 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
         : '';
     const kind = generationKind(schema);
     if (!continuationRaw) clearContinuation(kind);
+    // A continuation must not be generated with the old partial assistant
+    // message still in the chat. The core's normal generation path otherwise
+    // sees that draft as another turn and can persist the suffix as a second
+    // visible floor. Remove it only for the duration of this request, then
+    // restore the exact same object at the exact same index in finally.
+    const continuationDraft = continuationRaw
+        ? findStructuredDraft(draftToken, Number(draftIndex))
+        : null;
+    const continuationDraftIndex = continuationDraft ? ctx.chat.indexOf(continuationDraft) : Number(draftIndex);
+    if (continuationDraft && Array.isArray(ctx.chat)) {
+        ctx.chat.splice(continuationDraftIndex, 1);
+    }
     const beforeLength = ctx.chat?.length || 0;
+    const messagesBeforeGeneration = new Set(ctx.chat || []);
     let generated;
+    let generatedMessages = [];
     let temporaryUserMessage = null;
     const textarea = document.getElementById('send_textarea');
     const pendingUserInput = textarea?.value || '';
@@ -3077,6 +3128,9 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
         generated = (ctx.chat || []).slice(beforeLength)
             .filter(message => !message.is_user && text(message?.mes))
             .at(-1);
+        generatedMessages = (ctx.chat || []).filter(message => !messagesBeforeGeneration.has(message)
+            && !message.is_user
+            && text(message?.mes));
         // Some 1.17 adapters return foreground text before their chat-save
         // hook adds a message. It is still a valid parse source, although it
         // cannot be marked as a retained draft until the adapter saves it.
@@ -3093,10 +3147,18 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
         if (temporaryUserMessage && Array.isArray(ctx.chat)) {
             const temporaryIndex = ctx.chat.indexOf(temporaryUserMessage);
             if (temporaryIndex >= 0) ctx.chat.splice(temporaryIndex, 1);
+        }
+        if (continuationDraft && Array.isArray(ctx.chat) && !ctx.chat.includes(continuationDraft)) {
+            const insertionIndex = Number.isInteger(continuationDraftIndex) && continuationDraftIndex >= 0
+                ? Math.min(continuationDraftIndex, ctx.chat.length)
+                : ctx.chat.length;
+            ctx.chat.splice(insertionIndex, 0, continuationDraft);
+        }
+        if (temporaryUserMessage || continuationDraft) {
             try {
                 await ctx.saveChat?.();
             } catch (error) {
-                console.warn(`[${EXTENSION_ID}] failed to persist temporary-message cleanup`, error);
+                console.warn(`[${EXTENSION_ID}] failed to persist structured-message cleanup`, error);
             }
         }
         if (textarea && pendingUserInput && !textarea.value) {
@@ -3140,7 +3202,14 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
         const token = text(draftToken) || generationNonce(`${kind}-draft`);
         let currentDraftIndex = Number(draftIndex);
         if (continuationRaw) {
-            const draft = await replaceStructuredDraft(generated, raw, { kind, draftToken: token, draftIndex: currentDraftIndex });
+            const draft = await replaceStructuredDraft(generated, raw, {
+                kind,
+                draftToken: token,
+                draftIndex: currentDraftIndex,
+                draftMessage: continuationDraft,
+                generatedMessages,
+                restoreIndex: continuationDraftIndex,
+            });
             currentDraftIndex = draft ? ctx.chat.indexOf(draft) : currentDraftIndex;
         } else if (generated && (ctx.chat || []).includes(generated)) {
             generated.mes = raw;
@@ -3155,7 +3224,24 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
         saveGenerationSnapshot(kind, { raw, error: 'AI 输出被截断，等待继续生成' });
         throw new Error('AI 输出似乎被截断，已保留前文。请点击“继续生成”完成并导入。');
     }
-    if (continuationRaw) generated = await replaceStructuredDraft(generated, raw, { kind, draftToken, draftIndex });
+    if (continuationRaw) generated = await replaceStructuredDraft(generated, raw, {
+        kind,
+        draftToken,
+        draftIndex,
+        draftMessage: continuationDraft,
+        generatedMessages,
+        restoreIndex: continuationDraftIndex,
+    });
+    else if (generatedMessages.length > 1) {
+        // Keep a successful first-pass structured generation to one chat
+        // message as well if an adapter emitted duplicate assistant objects.
+        for (const message of generatedMessages) {
+            if (message === generated) continue;
+            const messageIndex = ctx.chat?.indexOf(message) ?? -1;
+            if (messageIndex >= 0) ctx.chat.splice(messageIndex, 1);
+        }
+        await ctx.saveChat?.();
+    }
     const generatedInChat = (ctx.chat || []).includes(generated);
     if (generatedInChat) {
         const token = text(draftToken) || text(generated.extra?.storyOutlineStudioDraft?.token) || generationNonce(`${kind}-draft`);
