@@ -3314,22 +3314,23 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
             textarea.value = '';
             textarea.dispatchEvent(new Event('input', { bubbles: true }));
         }
-        // First-pass foreground generation needs an in-memory user anchor so
-        // ST does not replace the preceding assistant turn. Native `continue`
-        // appends directly to the retained structured draft.
-        if (!continuationRaw && Array.isArray(ctx.chat)) {
+        // Foreground generation needs an in-memory user anchor. For a
+        // continuation this deliberately uses a normal assistant turn rather
+        // than native `continue`: the native path emits MESSAGE_RECEIVED
+        // before it mounts the updated message, which races MVU state bars.
+        // The generated assistant turn is removed after its text is merged
+        // back into the original structured draft.
+        if (Array.isArray(ctx.chat)) {
             temporaryUserMessage = {
                 name: ctx.name1 || 'User',
                 is_user: true,
-                mes: '[剧情工作台结构化请求]',
+                mes: continuationRaw ? '[剧情工作台结构化续写请求]' : '[剧情工作台结构化请求]',
                 extra: { storyOutlineStudioTemporary: true },
             };
             ctx.chat.push(temporaryUserMessage);
         }
-        if (continuationRaw) {
-            await syncStructuredChatDom({ targetIndex: continuationDraftIndex });
-        }
-        const result = await ctx.generate(continuationRaw ? 'continue' : 'normal', {
+        if (continuationRaw) await syncStructuredChatDom({ targetIndex: continuationDraftIndex });
+        const result = await ctx.generate('normal', {
             quiet_prompt: `${prompt}${schemaInstruction}${continuationInstruction}\n涉及成人内容时，参与者必须是成年人。`,
             quietToLoud: true,
             skipWIAN: true,
@@ -3495,11 +3496,7 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
 }
 
 async function generateStructured(prompt, schema, responseLength, options = {}) {
-    // Native `continue` emits MESSAGE_RECEIVED before SillyTavern mounts the
-    // updated message. MVU state bars can inspect that event immediately and
-    // fail on the missing DOM node, so structured continuations always use the
-    // quiet path and are merged into the original draft in place.
-    if (state.config.streamStructured && !options.forceQuiet && !options.continuationRaw) return generateJsonForeground(prompt, schema, options);
+    if (state.config.streamStructured && !options.forceQuiet) return generateJsonForeground(prompt, schema, options);
     return generateJson(prompt, schema, responseLength, options);
 }
 
