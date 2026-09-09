@@ -112,6 +112,9 @@ let generationEpoch = 0;
 let continuationGenerationInProgress = false;
 let structuredGenerationInProgress = false;
 let activeChatKey = '';
+let generationIntent = 'continue';
+let rewriteMessageIndex = -1;
+let pendingRewriteAfterDeletion = false;
 let buttonRetryTimer = null;
 let buttonRetryCount = 0;
 let loadedReferenceWorldBooks = new Map();
@@ -651,6 +654,7 @@ function defaultState() {
         completedStorySnapshot: '',
         completedStoryMessages: 0,
         trackedStoryMessageKeys: [],
+        trackedUserMessageKeys: [],
         worldBookName: '',
         npcWorldBookName: '',
         referenceWorldBookName: '',
@@ -706,6 +710,9 @@ function getState() {
     next.npcSource = next.npcSource === 'worldbook' ? 'worldbook' : 'generate';
     next.trackedStoryMessageKeys = Array.isArray(next.trackedStoryMessageKeys)
         ? unique(next.trackedStoryMessageKeys).slice(-200)
+        : [];
+    next.trackedUserMessageKeys = Array.isArray(next.trackedUserMessageKeys)
+        ? unique(next.trackedUserMessageKeys).slice(-200)
         : [];
     next.storyId = text(next.storyId);
     next.npcWorldBookName = text(next.npcWorldBookName);
@@ -1556,7 +1563,7 @@ function npcMarkup() {
 function storyMarkup() {
     const target = LENGTHS[state.config.length] || LENGTHS.short;
     const active = state.outlineAccepted && state.npcsAccepted;
-    return `<div class="sos-section-intro"><span class="sos-kicker">05 / STORY ENGINE</span><h2>按大纲推进剧情</h2><p>当前大纲版本 ${state.outlineVersion}，已推进 ${state.currentTurn} 楼，user 已输入 ${state.userTurnCount} 楼。${target.minTurns ? `本篇在达到最低 user 交互楼层前不会进入最终收束（最低 ${target.minTurns} 楼）。` : '短篇不设置最低楼层。'}</p></div><div class="sos-story-status"><span class="${active ? 'sos-ok' : 'sos-warn'}">${active ? '大纲与 NPC 已锁定' : '请先接受大纲和 NPC'}</span><span>已完成剧情快照：${state.completedStorySnapshot ? state.completedStorySnapshot.length + ' 字' : '暂无'}</span></div><div class="sos-revise"><label>中途修改大纲</label><textarea id="sos-mid-feedback" placeholder="已完成内容不会改变。写下你希望后续剧情怎样调整，然后重新审核大纲。"></textarea></div><div class="sos-actions"><button type="button" class="sos-primary" data-action="continue-story" ${active ? '' : 'disabled'}><i class="fa-solid fa-forward-step"></i> 继续剧情</button><button type="button" class="sos-secondary" data-action="revise-from-story"><i class="fa-solid fa-route"></i> 修改后续大纲</button><button type="button" class="sos-secondary" data-action="show-outline"><i class="fa-solid fa-scroll"></i> 查看当前大纲</button></div>`;
+    return `<div class="sos-section-intro"><span class="sos-kicker">05 / STORY ENGINE</span><h2>按大纲推进剧情</h2><p>当前大纲版本 ${state.outlineVersion}，已推进 ${state.currentTurn} 楼，user 已输入 ${state.userTurnCount} 楼。${target.minTurns ? `本篇在达到最低 user 交互楼层前不会进入最终收束（最低 ${target.minTurns} 楼）。` : '短篇不设置最低楼层。'}</p></div><div class="sos-story-status"><span class="${active ? 'sos-ok' : 'sos-warn'}">${active ? '大纲与 NPC 已锁定' : '请先接受大纲和 NPC'}</span><span>当前聊天已记录 ${state.completedStoryMessages || 0} 段剧情</span></div><div class="sos-revise"><label>中途修改大纲</label><textarea id="sos-mid-feedback" placeholder="已完成内容不会改变。写下你希望后续剧情怎样调整，然后重新审核大纲。"></textarea></div><div class="sos-actions"><button type="button" class="sos-primary" data-action="continue-story" ${active ? '' : 'disabled'}><i class="fa-solid fa-forward-step"></i> 继续剧情</button><button type="button" class="sos-secondary" data-action="revise-from-story"><i class="fa-solid fa-route"></i> 修改后续大纲</button><button type="button" class="sos-secondary" data-action="show-outline"><i class="fa-solid fa-scroll"></i> 查看当前大纲</button></div>`;
 }
 
 function dashboardMarkup() {
@@ -1796,6 +1803,9 @@ async function handleAction(action, button) {
             state = defaultState();
             saveState();
             activeStage = 'config';
+            generationIntent = 'continue';
+            rewriteMessageIndex = -1;
+            pendingRewriteAfterDeletion = false;
             rerender();
         }
         return;
@@ -3243,7 +3253,6 @@ async function generateOutline(feedback = '', mode = 'new', continuation = null)
         await ensureReferenceWorldBookLoaded();
         ensureStoryId();
         const length = LENGTHS[state.config.length] || LENGTHS.short;
-        const completed = state.completedStorySnapshot ? `\n已完成剧情（只可作为历史，不得改写）：${state.completedStorySnapshot}` : '';
         const recentStory = latestChatText();
         const characterStart = text(currentCharacterContext().fields.firstMessage);
         const storyContinuation = recentStory
@@ -3273,7 +3282,7 @@ async function generateOutline(feedback = '', mode = 'new', continuation = null)
         const revision = mode === 'revise'
             ? `\n用户修改意见：${feedback}\n这是基于当前大纲的修改。必须保留未被意见点名的段落、人物事实、关键词落实方式和结局方向；已完成剧情绝不能改写，只调整未完成部分。${state.currentTurn > 0 ? '当前已经跑过部分剧情：请把已发生事件视为不可修改的历史，只重新规划未完成部分，并让新大纲从最近消息自然接上，不得跳到结局或后日谈。' : ''}无论修改了几个段落，都必须重新输出一份完整的五段大纲和全部元数据，包含开端、发展、转折、高潮、结局、主要角色名、NPC 功能、NSFW 节点和硬性规则，不能只返回修改部分，也不能使用 outline_patch。`
             : '';
-        const prompt = `${basePrompt()}\n任务：生成一份${length.label}小说剧情大纲。短篇、中篇、长篇只表示整体篇幅倾向、事件密度和推进节奏，不是硬性字数上限；工作台不会从 AI 返回的大纲中截断任何内容。输出必须包含开端、发展、转折、高潮、结局五段，按这五段分别填写字段，不能把所有内容塞入单一 outline 字段。先完整规划起承转合、因果链、高潮和明确结局，再控制叙述密度。不得使用“……”或"..."代替未完成内容，不得因为篇幅省略结局、因果链、关键词落实或 NSFW 节点。每段都要简洁但必须有具体事件、因果和结局。严格落实所有已选背景、关系、基调、结局、情节关键词和特别要求，不得自行删掉标签。另列出主要 NPC 功能、NSFW 节点、硬性规则。必须在 characterNames（主要角色名）中列出当前 user 和每一名主要 NPC 的最终姓名，不能只写“user”“NPC”或职能。${nsfwRule}\n所有人物必须明确为成年人，性行为必须发生在成年人之间并符合用户设定。${identityRule}${previous}${novelty}${revision}${completed}${storyContinuation}${openingContext}\n若无法返回 JSON，请使用纯文本标签：<outline>内含“开端：...\n发展：...\n转折：...\n高潮：...\n结局：...”</outline>，并另写“主要角色名：user姓名、全部主要 NPC 姓名”。`;
+        const prompt = `${basePrompt()}\n任务：生成一份${length.label}小说剧情大纲。短篇、中篇、长篇只表示整体篇幅倾向、事件密度和推进节奏，不是硬性字数上限；工作台不会从 AI 返回的大纲中截断任何内容。输出必须包含开端、发展、转折、高潮、结局五段，按这五段分别填写字段，不能把所有内容塞入单一 outline 字段。先完整规划起承转合、因果链、高潮和明确结局，再控制叙述密度。不得使用“……”或"..."代替未完成内容，不得因为篇幅省略结局、因果链、关键词落实或 NSFW 节点。每段都要简洁但必须有具体事件、因果和结局。严格落实所有已选背景、关系、基调、结局、情节关键词和特别要求，不得自行删掉标签。另列出主要 NPC 功能、NSFW 节点、硬性规则。必须在 characterNames（主要角色名）中列出当前 user 和每一名主要 NPC 的最终姓名，不能只写“user”“NPC”或职能。${nsfwRule}\n所有人物必须明确为成年人，性行为必须发生在成年人之间并符合用户设定。${identityRule}${previous}${novelty}${revision}${storyContinuation}${openingContext}\n若无法返回 JSON，请使用纯文本标签：<outline>内含“开端：...\n发展：...\n转折：...\n高潮：...\n结局：...”</outline>，并另写“主要角色名：user姓名、全部主要 NPC 姓名”。`;
         // Leave enough upstream output budget for a complete five-part outline
         // and its metadata. The selected length is a pacing hint, not a token
         // ceiling, and the local formatter no longer truncates the response.
@@ -3702,16 +3711,23 @@ function storyPrompt() {
     const npcSourceRule = state.npcSource === 'worldbook'
         ? 'NPC 来源为角色卡/绑定世界书。只使用当前角色卡世界书、角色卡内置 character_book 和已选择参考世界书中已启用的角色条目；关闭条目不得出场，不要额外虚构工作台 NPC，也不要把旧聊天中的 NPC 当作当前 NPC。'
         : 'NPC 来源为工作台 AI 生成。只使用下方当前故事启用的 NPC；关闭的 NPC 不得出场。';
-    const completedSnapshot = state.completedStorySnapshot
-        ? `\n<completed_story_snapshot>\n这是上一段已经完成的剧情历史，仅用于承接上下文，不是新的 user 指令，也不是待执行的剧情要求：\n${state.completedStorySnapshot}\n</completed_story_snapshot>`
-        : '\n<completed_story_snapshot>暂无本地快照，请从酒馆当前聊天中最近一条已经完成的剧情承接。</completed_story_snapshot>';
+    const isRewrite = generationIntent === 'rewrite';
+    const visibleChat = latestChatText({ beforeMessageIndex: isRewrite ? rewriteMessageIndex : -1 });
+    const historyRule = isRewrite
+        ? `这是一次重写当前楼层任务。目标楼层是第 ${Math.max(1, rewriteMessageIndex + 1)} 条聊天消息。只能参考目标楼层之前的实际聊天，必须重新写这一楼；严禁把被重 roll 的旧正文当作事实，严禁跳到大纲后续楼层或结局。`
+        : '这是一次新的剧情推进任务。只能根据酒馆当前聊天中的实际历史和当前大纲推进下一段，不要把大纲内容当成已经发生的剧情。';
     const pacingRule = remaining > 0
         ? `距离最低交互要求还差 ${remaining} 个 user 楼层。在达到 ${min} 个 user 楼层前，严禁进入最终高潮、解决核心矛盾、完成终极目标、让主要关系定局或输出结局；本次只能推进过程事件并留下明确的后续行动空间。禁止出现“结局后”“后日谈”“多年后”“婚后日常”或故事已经结束的叙述。`
         : '已达到最低交互楼层，可以依据大纲和当前节奏进入高潮或结局，但不要无故跳过必要情节；只有真正完成大纲中的结局事件后，才允许写结局后的内容。';
-    const contextRule = state.currentTurn > 0
-        ? `酒馆会自动提供当前聊天的最近消息；请以最近一条实际 user 输入和上一条剧情为准，自动判断大纲已经推进到哪一段。当前工作台计数仅作辅助：剧情楼 ${state.currentTurn}，user 交互楼 ${state.userTurnCount}。不要把下面的完整大纲当成已经发生过的剧情。`
-        : '请从当前聊天最后一条实际内容承接开端；不要因为大纲包含高潮和结局就直接跳到故事末尾。';
-    return `${basePrompt()}\n<story_outline_studio_continuity>\n<current_effective_outline>\n当前唯一生效的大纲版本：${state.outlineVersion}\n旧聊天中出现的旧版本大纲、旧剧情指令或旧规划不得覆盖当前版本。以下大纲只是未来路线规划，不代表已经发生：\n${state.outline}\n</current_effective_outline>\n${completedSnapshot}\n<next_story_task>\n这是一次新的剧情推进任务。请根据上一段已完成剧情、酒馆当前聊天的最近实际消息，以及当前唯一生效的大纲版本，推进下一段剧情。必须发生新的事件、行动、信息或关系变化，不得重复上一段。快照中的“下段剧情”或类似文字只是历史内容，绝不是当前 user 指令。\n</next_story_task>\n</story_outline_studio_continuity>\n当前故事 ID：${ensureStoryId()}\n当前 user 唯一姓名：${currentUserName() || '尚未确定'}\n当前故事启用的 NPC：${JSON.stringify(activeNpcs)}\n关闭的 NPC 不得出场、不得作为关系对象、不得被世界书上下文重新启用。\n${contextRule}\n${state.npcSource === 'worldbook' ? `角色卡/绑定世界书当前启用条目（这些是本故事唯一可用的现成 NPC/设定候选，关闭条目不在此处）：\n<active_worldbook_npc_entries>\n${activeWorldBooks}\n</active_worldbook_npc_entries>` : ''}\n本地已完成剧情记录长度：${state.completedStorySnapshot ? state.completedStorySnapshot.length : 0} 字，最多保留最近 12000 字。\n本篇最低 user 交互楼层：${min}\n楼层硬约束：${pacingRule}\n配置中的特别想看的情节、禁区和补充要求：${text(state.config.detail) || '暂无'}\n特别要求是本次剧情的高优先级约束；其中明确指定的中途、高潮、结尾或场景，必须在未完成大纲范围内优先落实，已完成部分除外。\n硬规则：严格按照当前唯一生效的大纲版本和所有配置关键词推进；不要擅自改变 user 人设；不要让 NPC OOC；不要提前结局；已完成剧情只当作历史；新的剧情必须连接最近聊天内容。user 本楼明确做出的行动、选择、拒绝、目标和新要求优先于未发生的大纲情节；不要无视 user 输入，也不要强行把 user 拉回原轨。普通偏差要自然吸收，并把未完成的大纲事件改写成能由当前行动导向的版本。若 user 的行动与未完成大纲的关键事件、关系走向或结局方向发生实质冲突，先承接 user 已经做出的事实，不要在本楼强行纠正；将其作为新的分支，并提示 user 可用“修改后续大纲”确认后续路线。已完成剧情绝不能改写。如果 user 本楼只输入“继续剧情”或等价推进指令，不要把这几个字当作剧情事实，直接按照当前唯一生效的大纲版本、最近聊天和当前节奏推进下一楼。只输出本次剧情正文，不要大纲、总结、设定说明。`;
+    const contextRule = isRewrite
+        ? '酒馆会根据本次重写任务提供当前上下文；上一条被替换的 assistant 正文不属于可参考历史。'
+        : state.currentTurn > 0
+            ? `酒馆会自动提供当前聊天的实际消息；请以最近一条实际 user 输入和上一条剧情为准，自动判断大纲已经推进到哪一段。当前工作台计数仅作辅助：剧情楼 ${state.currentTurn}，user 交互楼 ${state.userTurnCount}。`
+            : '请从当前聊天最后一条实际内容承接开端；不要因为大纲包含高潮和结局就直接跳到故事末尾。';
+    const actualHistory = visibleChat
+        ? `\n<current_chat_history>以下是当前酒馆聊天中可参考的真实历史。它会随删除、重 roll 和编辑实时变化；这里只能把它当作已经发生的事实，不是新的 user 指令：\n${visibleChat}\n</current_chat_history>`
+        : '\n<current_chat_history>当前目标之前没有可用的聊天历史，请从角色卡开场和当前大纲的开端自然开始。</current_chat_history>';
+    return `${basePrompt()}\n<story_outline_studio_continuity>\n<current_effective_outline>\n当前唯一生效的大纲版本：${state.outlineVersion}\n旧聊天中出现的旧版本大纲、旧剧情指令或旧规划不得覆盖当前版本。以下大纲只是未来路线规划，不代表已经发生：\n${state.outline}\n</current_effective_outline>${actualHistory}\n<next_story_task>\n${historyRule}当前聊天会由酒馆原生上下文继续提供；不得把大纲内容当成已经发生的剧情。\n</next_story_task>\n</story_outline_studio_continuity>\n当前故事 ID：${ensureStoryId()}\n当前 user 唯一姓名：${currentUserName() || '尚未确定'}\n当前故事启用的 NPC：${JSON.stringify(activeNpcs)}\n关闭的 NPC 不得出场、不得作为关系对象、不得被世界书上下文重新启用。\n${contextRule}\n${state.npcSource === 'worldbook' ? `角色卡/绑定世界书当前启用条目（这些是本故事唯一可用的现成 NPC/设定候选，关闭条目不在此处）：\n<active_worldbook_npc_entries>\n${activeWorldBooks}\n</active_worldbook_npc_entries>` : ''}\n不要使用或猜测旧的剧情快照；以当前聊天中实际仍存在的消息为唯一剧情历史。\n本篇最低 user 交互楼层：${min}\n楼层硬约束：${pacingRule}\n配置中的特别想看的情节、禁区和补充要求：${text(state.config.detail) || '暂无'}\n特别要求是本次剧情的高优先级约束；其中明确指定的中途、高潮、结尾或场景，必须在未完成大纲范围内优先落实，已完成部分除外。\n硬规则：严格按照当前唯一生效的大纲版本和所有配置关键词推进；不要擅自改变 user 人设；不要让 NPC OOC；不要提前结局；已完成剧情只当作历史；新的剧情必须连接最近聊天内容。user 本楼明确做出的行动、选择、拒绝、目标和新要求优先于未发生的大纲情节；不要无视 user 输入，也不要强行把 user 拉回原轨。普通偏差要自然吸收，并把未完成的大纲事件改写成能由当前行动导向的版本。若 user 的行动与未完成大纲的关键事件、关系走向或结局方向发生实质冲突，先承接 user 已经做出的事实，不要在本楼强行纠正；将其作为新的分支，并提示 user 可用“修改后续大纲”确认后续路线。已完成剧情绝不能改写。如果 user 本楼只输入“继续剧情”或等价推进指令，不要把这几个字当作剧情事实，直接按照当前唯一生效的大纲版本、最近聊天和当前节奏推进下一楼。只输出本次剧情正文，不要大纲、总结、设定说明。`;
 }
 
 function updateContinuityPrompt() {
@@ -3722,8 +3738,11 @@ function updateContinuityPrompt() {
     ctx.setExtensionPrompt?.(PROMPT_KEY, storyPrompt(), 1, 0, false);
 }
 
-function latestChatText() {
-    return (ctx.chat || []).slice(-12)
+function latestChatText({ beforeMessageIndex = -1 } = {}) {
+    const source = beforeMessageIndex >= 0
+        ? (ctx.chat || []).slice(0, beforeMessageIndex)
+        : (ctx.chat || []);
+    return source.slice(-16)
         .filter(message => {
             const extra = message?.extra || {};
             return text(message?.mes)
@@ -3731,7 +3750,7 @@ function latestChatText() {
                 && !extra.storyOutlineStudioTemporary
                 && !extra.storyOutlineStudio?.continuationDirective;
         })
-        .slice(-8)
+        .slice(-12)
         .map(message => `${message.name || (message.is_user ? ctx.name1 : ctx.name2)}：${message.mes}`)
         .join('\n');
 }
@@ -3742,11 +3761,11 @@ function isContinuationDirective(value) {
 
 function storyMessageKey(message, index) {
     const id = text(message?.mesId || message?.id || message?.send_date);
-    return id ? `${id}:${index}` : `${index}:${text(message?.name)}:${text(message?.mes).slice(0, 160)}`;
+    return id ? id : `${index}:${text(message?.name)}:${text(message?.mes).slice(0, 160)}`;
 }
 
 function trackReceivedStoryMessage(messageIndex) {
-    if (!state?.outlineAccepted || !state?.npcsAccepted || structuredGenerationInProgress || continuationGenerationInProgress) return;
+    if (!state?.outlineAccepted || !state?.npcsAccepted || structuredGenerationInProgress) return;
     const index = Number(messageIndex);
     const message = Number.isInteger(index) ? ctx.chat?.[index] : null;
     if (!message || message.is_user || !text(message.mes) || message.extra?.storyOutlineStudioTemporary || message.extra?.storyOutlineStudioDraft) return;
@@ -3769,30 +3788,60 @@ function trackReceivedStoryMessage(messageIndex) {
     if (panel?.classList.contains('open')) rerender();
 }
 
+function syncStoryProgressFromChat({ render = false } = {}) {
+    if (!state || !ctx?.chat) return;
+    const storyMessages = ctx.chat.filter(message => !message?.is_user && message?.extra?.storyOutlineStudio?.countedInteraction && text(message?.mes));
+    const chatKeys = new Set(ctx.chat.map((message, index) => storyMessageKey(message, index)));
+    const userMessages = ctx.chat.filter((message, index) => message?.is_user
+        && text(message?.mes)
+        && !message?.extra?.storyOutlineStudioTemporary
+        && !message?.extra?.storyOutlineStudioDraft
+        && state.trackedUserMessageKeys.includes(storyMessageKey(message, index)));
+    state.trackedStoryMessageKeys = storyMessages.map((message, index) => storyMessageKey(message, index)).slice(-200);
+    state.trackedUserMessageKeys = state.trackedUserMessageKeys.filter(key => chatKeys.has(key)).slice(-200);
+    state.currentTurn = storyMessages.length;
+    state.completedStoryMessages = storyMessages.length;
+    // Older metadata did not retain user message keys. Keep its already
+    // tracked count until a new marked user message gives us a complete key
+    // set, while new chats use exact current-chat counting.
+    if (state.trackedUserMessageKeys.length || userMessages.length) state.userTurnCount = userMessages.length;
+    if (render) {
+        saveState();
+        if (panel?.classList.contains('open')) rerender();
+    }
+}
+
+function setGenerationIntent(intent, messageIndex = -1) {
+    generationIntent = intent === 'rewrite' ? 'rewrite' : 'continue';
+    rewriteMessageIndex = generationIntent === 'rewrite'
+        ? Math.max(0, Number.isInteger(Number(messageIndex)) ? Number(messageIndex) : (ctx.chat?.length || 1) - 1)
+        : -1;
+    updateContinuityPrompt();
+}
+
+function markRewriteAfterDeletion() {
+    pendingRewriteAfterDeletion = true;
+    generationIntent = 'rewrite';
+    rewriteMessageIndex = ctx.chat?.length || 0;
+    updateContinuityPrompt();
+}
+
 async function continueStory() {
     await withGenerating(async () => {
         if (!state.outlineAccepted || !state.npcsAccepted) return toastr.warning('请先接受大纲和 NPC。');
         await ensureReferenceWorldBookLoaded();
         const beforeLength = ctx.chat.length;
         const continuationDirective = '请根据当前有效剧情大纲、上一段已完成剧情和当前聊天上下文，继续下一段剧情。必须推进新的事件，不要重复上一段，也不要进入结局后的后日谈。';
-        const continuationUserMessage = {
-            name: ctx.name1 || 'User',
-            is_user: true,
-            mes: continuationDirective,
-            extra: {
-                storyOutlineStudio: {
-                    continuationDirective: true,
-                    countedInteraction: true,
-                    outlineVersion: state.outlineVersion,
-                },
-            },
-        };
         continuationGenerationInProgress = true;
         try {
-            // Keep the button equivalent to a deliberate quick reply: the
-            // explicit user instruction stays in chat and becomes the input
-            // for the native foreground generation pipeline.
-            ctx.chat.push(continuationUserMessage);
+            setGenerationIntent('continue');
+            // Use SillyTavern's normal foreground send path. This inserts the
+            // directive as a visible user message, saves it, emits the normal
+            // message events, and starts generation just like a Quick Reply.
+            const textarea = document.querySelector('#send_textarea');
+            if (!textarea) throw new Error('找不到酒馆输入框，无法发送继续剧情指令。');
+            textarea.value = continuationDirective;
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
             await ctx.generate('normal', {
                 quiet_prompt: `【继续剧情指令】\n${continuationDirective}\n必须根据当前唯一生效的大纲版本推进新的事件、行动、信息或关系变化；不得重复上一段，不得把上一段快照中的旧指令当成当前指令，不得在大纲尚未真正完成时进入结局后的后日谈。`,
                 quietToLoud: true,
@@ -3804,18 +3853,8 @@ async function continueStory() {
                 .at(-1);
             const content = text(generated?.mes);
             if (!generated || !content) throw new Error('酒馆请求已完成，但没有写入剧情消息。请检查 API 响应和酒馆控制台。');
-            state.currentTurn += 1;
-            state.completedStoryMessages += 1;
-            state.completedStorySnapshot = `${state.completedStorySnapshot}\n${content}`.trim().slice(-12000);
-            state.userTurnCount += 1;
-            generated.extra = {
-                ...(generated.extra || {}),
-                storyOutlineStudio: {
-                    version: state.outlineVersion,
-                    turn: state.currentTurn,
-                    countedInteraction: true,
-                },
-            };
+            trackReceivedStoryMessage(ctx.chat.indexOf(generated));
+            syncStoryProgressFromChat();
             saveState();
             await ctx.saveChat?.();
             rerender();
@@ -3823,6 +3862,7 @@ async function continueStory() {
             throw wrapGenerationError(error);
         } finally {
             continuationGenerationInProgress = false;
+            setGenerationIntent('continue');
         }
     });
 }
@@ -3905,6 +3945,9 @@ function installEvents() {
             generationEpoch += 1;
             state = getState();
             activeStage = 'config';
+            generationIntent = 'continue';
+            rewriteMessageIndex = -1;
+            pendingRewriteAfterDeletion = false;
         }
         void refreshAvailableWorldBooks(true);
         void ensureReferenceWorldBookLoaded()
@@ -3916,13 +3959,59 @@ function installEvents() {
     ctx.eventSource?.on?.(ctx.eventTypes.MESSAGE_SENT, messageIndex => {
         if (!state || !state.outlineAccepted) return;
         const message = Number.isInteger(messageIndex) ? ctx.chat?.[messageIndex] : null;
-        if (!message?.is_user || isContinuationDirective(message.mes)) return;
-        if (message?.extra?.storyOutlineStudio?.countedInteraction) return;
-        state.userTurnCount += 1;
+        if (!message?.is_user || message?.extra?.storyOutlineStudioTemporary || message?.extra?.storyOutlineStudioDraft) return;
+        if (pendingRewriteAfterDeletion) {
+            setGenerationIntent('rewrite', Number.isInteger(messageIndex) ? messageIndex + 1 : ctx.chat.length);
+        }
+        const continuation = continuationGenerationInProgress;
+        message.extra = {
+            ...(message.extra || {}),
+            storyOutlineStudio: {
+                ...(message.extra?.storyOutlineStudio || {}),
+                ...(continuation ? { continuationDirective: true } : {}),
+                countedUserInteraction: true,
+                outlineVersion: state.outlineVersion,
+            },
+        };
+        state.trackedUserMessageKeys = [...state.trackedUserMessageKeys, storyMessageKey(message, messageIndex)].slice(-200);
+        syncStoryProgressFromChat();
         saveState();
     });
     ctx.eventSource?.on?.(ctx.eventTypes.MESSAGE_RECEIVED, messageIndex => {
         trackReceivedStoryMessage(messageIndex);
+    });
+    ctx.eventSource?.on?.(ctx.eventTypes.MESSAGE_SWIPED, messageIndex => {
+        setGenerationIntent('rewrite', messageIndex);
+    });
+    ctx.eventSource?.on?.(ctx.eventTypes.GENERATION_STARTED, type => {
+        if (type === 'regenerate' || type === 'swipe') {
+            setGenerationIntent('rewrite', (ctx.chat?.length || 1) - 1);
+        } else if (type === 'normal' || type === 'continue') {
+            if (pendingRewriteAfterDeletion) {
+                generationIntent = 'rewrite';
+                rewriteMessageIndex = Math.max(0, ctx.chat?.length || 0);
+                updateContinuityPrompt();
+            } else {
+                setGenerationIntent('continue');
+            }
+        }
+    });
+    ctx.eventSource?.on?.(ctx.eventTypes.MESSAGE_DELETED, () => {
+        const previousStoryCount = Number(state?.currentTurn || 0);
+        syncStoryProgressFromChat({ render: true });
+        if (state && state.currentTurn < previousStoryCount) markRewriteAfterDeletion();
+    });
+    ctx.eventSource?.on?.(ctx.eventTypes.MESSAGE_UPDATED, () => {
+        syncStoryProgressFromChat({ render: true });
+    });
+    ctx.eventSource?.on?.(ctx.eventTypes.MESSAGE_SWIPE_DELETED, () => {
+        const previousStoryCount = Number(state?.currentTurn || 0);
+        syncStoryProgressFromChat({ render: true });
+        if (state && state.currentTurn < previousStoryCount) markRewriteAfterDeletion();
+    });
+    ctx.eventSource?.on?.(ctx.eventTypes.GENERATION_ENDED, () => {
+        pendingRewriteAfterDeletion = false;
+        setGenerationIntent('continue');
     });
 }
 
