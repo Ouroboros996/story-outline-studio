@@ -2790,13 +2790,19 @@ function findStructuredDraft(token, fallbackIndex = -1) {
     return Number.isInteger(fallbackIndex) && fallbackIndex >= 0 ? ctx.chat[fallbackIndex] : null;
 }
 
+function getStructuredMessageElement(index) {
+    if (typeof document === 'undefined' || !Number.isInteger(Number(index)) || Number(index) < 0) return null;
+    return document.querySelector(`#chat .mes[mesid="${Number(index)}"]`);
+}
+
 function structuredChatDomIsAligned(targetIndex = -1) {
     if (typeof document === 'undefined' || !Array.isArray(ctx?.chat)) return true;
+    if (Number.isInteger(Number(targetIndex)) && Number(targetIndex) >= 0) {
+        return Boolean(getStructuredMessageElement(Number(targetIndex)));
+    }
     const elements = [...document.querySelectorAll('#chat .mes')];
     if (elements.length !== ctx.chat.length) return false;
-    const aligned = elements.every((element, index) => Number(element.getAttribute('mesid')) === index);
-    if (!aligned) return false;
-    return targetIndex < 0 || Boolean(document.querySelector(`#chat .mes[mesid="${targetIndex}"]`));
+    return elements.every((element, index) => Number(element.getAttribute('mesid')) === index);
 }
 
 async function waitForStructuredChatFrame() {
@@ -2805,22 +2811,48 @@ async function waitForStructuredChatFrame() {
 }
 
 async function syncStructuredChatDom({ targetIndex = -1, forceReload = false } = {}) {
-    if (!Array.isArray(ctx?.chat) || typeof document === 'undefined') return;
-    if (!forceReload && structuredChatDomIsAligned(targetIndex)) return;
+    if (!Array.isArray(ctx?.chat) || typeof document === 'undefined') return false;
+    if (!forceReload && structuredChatDomIsAligned(targetIndex)) return true;
     if (typeof ctx.reloadCurrentChat !== 'function') {
         console.warn(`[${EXTENSION_ID}] current chat DOM is out of sync, but reloadCurrentChat is unavailable`);
-        return;
+        return structuredChatDomIsAligned(targetIndex);
     }
     await ctx.reloadCurrentChat();
     await waitForStructuredChatFrame();
+    if (structuredChatDomIsAligned(targetIndex)) return true;
+
+    // A chat reload can finish before a message outside the normal viewport
+    // has been mounted. Add only the requested message as a last resort;
+    // never call updateMessageBlock against a missing DOM node.
+    const index = Number(targetIndex);
+    const message = Number.isInteger(index) && index >= 0 ? ctx.chat[index] : null;
+    if (message && typeof ctx.addOneMessage === 'function' && !getStructuredMessageElement(index)) {
+        try {
+            ctx.addOneMessage(message, { forceId: index, scroll: false, showSwipes: false });
+            await waitForStructuredChatFrame();
+        } catch (error) {
+            console.warn(`[${EXTENSION_ID}] failed to mount structured message ${index}`, error);
+        }
+    }
+    return structuredChatDomIsAligned(targetIndex);
 }
 
 async function refreshStructuredMessage(message) {
     const index = Array.isArray(ctx?.chat) ? ctx.chat.indexOf(message) : -1;
     if (index < 0) return;
-    await syncStructuredChatDom({ targetIndex: index });
+    const mounted = await syncStructuredChatDom({ targetIndex: index });
+    if (!mounted || !getStructuredMessageElement(index)) {
+        console.warn(`[${EXTENSION_ID}] skipped structured message refresh because message ${index} is not mounted`);
+        return;
+    }
     if (typeof ctx.updateMessageBlock === 'function') {
-        ctx.updateMessageBlock(index, message);
+        try {
+            ctx.updateMessageBlock(index, message);
+        } catch (error) {
+            // MVU/reasoning extensions can race the core renderer while a
+            // chat is reloading. The saved chat data remains authoritative.
+            console.warn(`[${EXTENSION_ID}] structured message refresh raced chat rendering`, error);
+        }
     }
 }
 
@@ -3463,7 +3495,11 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
 }
 
 async function generateStructured(prompt, schema, responseLength, options = {}) {
-    if (state.config.streamStructured && !options.forceQuiet) return generateJsonForeground(prompt, schema, options);
+    // Native `continue` emits MESSAGE_RECEIVED before SillyTavern mounts the
+    // updated message. MVU state bars can inspect that event immediately and
+    // fail on the missing DOM node, so structured continuations always use the
+    // quiet path and are merged into the original draft in place.
+    if (state.config.streamStructured && !options.forceQuiet && !options.continuationRaw) return generateJsonForeground(prompt, schema, options);
     return generateJson(prompt, schema, responseLength, options);
 }
 
