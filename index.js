@@ -3314,23 +3314,29 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
             textarea.value = '';
             textarea.dispatchEvent(new Event('input', { bubbles: true }));
         }
-        // Foreground generation needs an in-memory user anchor. For a
-        // continuation this deliberately uses a normal assistant turn rather
-        // than native `continue`: the native path emits MESSAGE_RECEIVED
-        // before it mounts the updated message, which races MVU state bars.
-        // The generated assistant turn is removed after its text is merged
-        // back into the original structured draft.
-        if (Array.isArray(ctx.chat)) {
+        // First-pass foreground generation needs an in-memory user anchor so
+        // ST does not replace the preceding assistant turn. A structured
+        // continuation must use native `continue`, which appends directly to
+        // the retained assistant draft instead of asking for a new outline.
+        if (!continuationRaw && Array.isArray(ctx.chat)) {
             temporaryUserMessage = {
                 name: ctx.name1 || 'User',
                 is_user: true,
-                mes: continuationRaw ? '[剧情工作台结构化续写请求]' : '[剧情工作台结构化请求]',
+                mes: '[剧情工作台结构化请求]',
                 extra: { storyOutlineStudioTemporary: true },
             };
             ctx.chat.push(temporaryUserMessage);
         }
-        if (continuationRaw) await syncStructuredChatDom({ targetIndex: continuationDraftIndex });
-        const result = await ctx.generate('normal', {
+        if (continuationRaw) {
+            // The native continue flow emits MESSAGE_RECEIVED before its
+            // swipe-style DOM refresh. Make sure the original draft element
+            // already exists so MVU/reasoning listeners have a real target.
+            const mounted = await syncStructuredChatDom({ targetIndex: continuationDraftIndex });
+            if (!mounted || !getStructuredMessageElement(continuationDraftIndex)) {
+                throw new Error('无法在原楼层继续生成：截断草稿楼层尚未挂载，请刷新聊天后重试。');
+            }
+        }
+        const result = await ctx.generate(continuationRaw ? 'continue' : 'normal', {
             quiet_prompt: `${prompt}${schemaInstruction}${continuationInstruction}\n涉及成人内容时，参与者必须是成年人。`,
             quietToLoud: true,
             skipWIAN: true,
