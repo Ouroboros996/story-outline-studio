@@ -574,6 +574,32 @@ function outlineNpcNames(data) {
     });
 }
 
+function outlineNpcConstraints(data) {
+    const normalized = normalizeOutlineData(data);
+    const sections = [
+        ...normalized.npcFunctions,
+        ...normalized.hardRules,
+        normalized.opening,
+        normalized.development,
+        normalized.turningPoint,
+        normalized.climax,
+        normalized.ending,
+    ].map(text).filter(Boolean);
+    return outlineNpcNames(normalized).map(name => {
+        const related = sections.filter(section => containsAnyName(section, [name]));
+        let personality = '';
+        for (const section of related) {
+            const afterName = section.slice(Math.max(0, section.indexOf(name) + name.length));
+            const match = afterName.match(/(?:核心)?性格\s*[：:为是]\s*([^|｜；;。\n]+)/u);
+            if (match?.[1]) {
+                personality = text(match[1]);
+                break;
+            }
+        }
+        return { name, personality, source: related.join('；') };
+    });
+}
+
 function hasSameOutlineCast(first, second) {
     const firstNames = new Set(outlineNpcNames(first).map(canonicalText));
     const secondNames = new Set(outlineNpcNames(second).map(canonicalText));
@@ -1329,6 +1355,20 @@ function lockNpcNames(npcs, lockedNames) {
             ...(assignment?.npc || {}),
             name,
             aliases: unique([name, ...(assignment?.npc?.aliases || [])]),
+        });
+    });
+}
+
+function lockNpcsToOutline(npcs, outlineData) {
+    const constraints = outlineNpcConstraints(outlineData);
+    const locked = lockNpcNames(npcs, constraints.map(item => item.name));
+    if (!locked) return null;
+    return locked.map(npc => {
+        const constraint = constraints.find(item => canonicalText(item.name) === canonicalText(npc.name));
+        return normalizeNpc({
+            ...npc,
+            name: constraint?.name || npc.name,
+            personality: constraint?.personality || npc.personality,
         });
     });
 }
@@ -2541,7 +2581,12 @@ function normalizeGeneratedResult(parsed, schema) {
 function hasGeneratedShape(parsed, schema) {
     if (!parsed || typeof parsed !== 'object') return false;
     const properties = schema?.properties || {};
-    if (properties.npcs) return Array.isArray(parsed.npcs) && parsed.npcs.length > 0;
+    if (properties.npcs) {
+        const npcs = Array.isArray(parsed.npcs) ? parsed.npcs : [];
+        const minimum = Number(properties.npcs.minItems) || 1;
+        const maximum = Number(properties.npcs.maxItems) || Infinity;
+        return npcs.length >= minimum && npcs.length <= maximum;
+    }
     if (properties.name && !properties.opening) {
         const persona = parsed.persona || parsed;
         return Boolean(persona && typeof persona === 'object' && (persona.name || persona['姓名']));
@@ -2557,7 +2602,22 @@ function hasGeneratedShape(parsed, schema) {
 
 function continuationPrefixForIncompleteResponse(raw, parsed, schema) {
     const source = stripReasoningBlocks(raw).trim();
-    if (!source || hasGeneratedShape(parsed, schema) || !schema?.properties?.opening) return source;
+    if (!source || hasGeneratedShape(parsed, schema)) return source;
+
+    if (schema?.properties?.npcs && /<\/npcs>\s*$/iu.test(source)) {
+        return source.replace(/<\/npcs>\s*$/iu, '\n');
+    }
+    if (schema?.properties?.npcs) {
+        const fenced = source.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/iu);
+        const body = (fenced?.[1] || source).trim();
+        if (/^\{[\s\S]*\]\s*\}$/u.test(body)) {
+            return body.replace(/\]\s*\}\s*$/u, ',\n');
+        }
+        if (/^\[[\s\S]*\]$/u.test(body)) {
+            return `${body.slice(0, -1).replace(/,\s*$/u, '').trimEnd()},\n`;
+        }
+    }
+    if (!schema?.properties?.opening) return source;
 
     if (/^<outline\b[^>]*>[\s\S]*<\/outline>\s*$/iu.test(source)) {
         return source.replace(/<\/outline>\s*$/iu, '\n');
@@ -2638,6 +2698,8 @@ function isLikelyTruncatedResponse(raw, parsed, schema) {
     }
     if (properties.npcs) {
         const npcs = Array.isArray(parsed?.npcs) ? parsed.npcs : [];
+        const minimum = Number(properties.npcs.minItems) || 1;
+        if (npcs.length > 0 && npcs.length < minimum) return true;
         const required = ['name', 'aliases', 'gender', 'age', 'height', 'appearance', 'personality', 'identity', 'past', 'relationship', 'attitude', 'quotes', 'nsfw', 'body'];
         return npcs.length > 0 && npcs.some(npc => required.some(key => Array.isArray(npc?.[key]) ? !npc[key].length : !text(npc?.[key])));
     }
@@ -2841,11 +2903,36 @@ function parseGeneratedPayload(raw, allowText = false, schema = null) {
     return null;
 }
 
+function joinContinuationRaw(previousRaw, continuationText, schema) {
+    const previous = text(previousRaw);
+    const next = text(continuationText);
+    if (!schema?.properties?.npcs) return `${previous}${next}`;
+
+    // Some adapters ask the model for a continuation but receive the missing
+    // NPCs inside a new root wrapper. Preserve the NPCs from the first half
+    // and remove only that duplicate wrapper before joining the two halves.
+    if (countTag(previous, 'npcs') > countTag(previous, 'npcs', true)
+        && /^\s*<npcs\b[^>]*>/iu.test(next)) {
+        return `${previous}${next.replace(/^\s*<npcs\b[^>]*>\s*/iu, '')}`;
+    }
+
+    const previousTrimmed = previous.trimEnd();
+    if (previousTrimmed.endsWith(',')) {
+        const objectWrapped = next.match(/^\s*(?:```(?:json)?\s*)?\{\s*["']npcs["']\s*:\s*\[([\s\S]*)\]\s*\}\s*(?:```)?\s*$/iu);
+        if (objectWrapped) return `${previous}${objectWrapped[1].trim() }]}`;
+        const arrayWrapped = next.match(/^\s*(?:```(?:json)?\s*)?\[([\s\S]*)\]\s*(?:```)?\s*$/iu);
+        if (arrayWrapped) return `${previous}${arrayWrapped[1].trim()}]`;
+    }
+    return `${previous}${next}`;
+}
+
 function parseContinuationPayload(previousRaw, continuationText, allowText, schema) {
     const previous = text(previousRaw);
     const next = text(continuationText);
-    const combined = `${previous}${next}`;
+    const combined = joinContinuationRaw(previous, next, schema);
+    const directCombined = `${previous}${next}`;
     const combinedParsed = parseGeneratedPayload(combined, allowText, schema);
+    const directCombinedParsed = combined === directCombined ? combinedParsed : parseGeneratedPayload(directCombined, allowText, schema);
     const standaloneParsed = parseGeneratedPayload(next, allowText, schema);
     const standaloneLooksRooted = schema?.properties?.npcs
         ? /<npcs?\b|^\s*(?:```(?:json)?\s*)?[\[{]/iu.test(next)
@@ -2853,16 +2940,17 @@ function parseContinuationPayload(previousRaw, continuationText, allowText, sche
             ? /<persona\b|^\s*(?:```(?:json)?\s*)?[\[{]/iu.test(next)
             : /<outline\b|^\s*(?:```(?:json)?\s*)?[\[{]/iu.test(next);
 
-    // A gateway may ignore the suffix instruction and return a fresh complete
-    // response. A rooted complete response is independent by definition; use
-    // it before trying to append it to the truncated prefix.
-    if (standaloneLooksRooted && standaloneParsed && hasGeneratedShape(standaloneParsed, schema)
-        && !isLikelyTruncatedResponse(next, standaloneParsed, schema)) {
-        return { raw: next, parsed: standaloneParsed };
-    }
+    // Always prefer the full draft assembled from the retained first half and
+    // the continuation. A continuation adapter may put the remaining NPCs in
+    // a fresh <npcs> root; parsing that root by itself would silently discard
+    // every NPC already present in the retained chat message.
     if (combinedParsed && hasGeneratedShape(combinedParsed, schema)
         && !isLikelyTruncatedResponse(combined, combinedParsed, schema)) {
         return { raw: combined, parsed: combinedParsed };
+    }
+    if (directCombinedParsed && hasGeneratedShape(directCombinedParsed, schema)
+        && !isLikelyTruncatedResponse(directCombined, directCombinedParsed, schema)) {
+        return { raw: directCombined, parsed: directCombinedParsed };
     }
 
     // Some gateways ignore the instruction to continue after the last
@@ -2870,11 +2958,11 @@ function parseContinuationPayload(previousRaw, continuationText, allowText, sche
     // concatenating the two responses creates duplicate roots and prevents
     // import. Prefer the standalone complete response only when it parses as
     // a complete result; normal suffix-only continuation still uses combined.
-    if (standaloneParsed && hasGeneratedShape(standaloneParsed, schema)
+    if (standaloneLooksRooted && standaloneParsed && hasGeneratedShape(standaloneParsed, schema)
         && !isLikelyTruncatedResponse(next, standaloneParsed, schema)) {
         return { raw: next, parsed: standaloneParsed };
     }
-    return { raw: combined, parsed: combinedParsed };
+    return { raw: combined, parsed: combinedParsed || directCombinedParsed };
 }
 
 function generatedErrorMessage(error) {
@@ -3065,26 +3153,41 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
         : '不要输出解释、Markdown 或思维链。若你能稳定返回 JSON，也可以返回单个 JSON 对象。';
     const schemaInstruction = `\n字段参考（不要输出 schema）：${JSON.stringify(generationSchema)}\n${patchProtocol}${outputFormatRule}`;
     const continuationInstruction = continuationRaw
-        ? `\n这是上一次同一结构化响应的续写请求。已有前文如下，请从最后一个字符之后继续，只输出缺失后半段，不要重复前文或重新输出开头标签，直到完整闭合结构：\n<already_received>\n${continuationRaw}\n</already_received>\n`
+        ? '\n这是对当前最后一条 assistant 结构化草稿的原位续写。请紧接草稿最后一个字符，只输出缺失的后半段；禁止重复已有内容、禁止重新输出开头标签、禁止输出解释或 Markdown，直到完整闭合全部标签和字段。\n'
         : '';
     const kind = generationKind(schema);
     if (!continuationRaw) clearContinuation(kind);
-    // A continuation must not be generated with the old partial assistant
-    // message still in the chat. The core's normal generation path otherwise
-    // sees that draft as another turn and can persist the suffix as a second
-    // visible floor. Remove it only for the duration of this request, then
-    // restore the exact same object at the exact same index in finally.
     const continuationDraft = continuationRaw
         ? findStructuredDraft(draftToken, Number(draftIndex))
         : null;
     const continuationDraftIndex = continuationDraft ? ctx.chat.indexOf(continuationDraft) : Number(draftIndex);
-    if (continuationDraft && Array.isArray(ctx.chat)) {
-        ctx.chat.splice(continuationDraftIndex, 1);
+    if (continuationDraft && continuationDraftIndex >= 0 && continuationDraftIndex < ctx.chat.length - 1) {
+        const trailing = ctx.chat.slice(continuationDraftIndex + 1);
+        const suffix = trailing.every(message => !message?.is_user && !message?.is_system)
+            ? trailing.map(message => text(message?.mes)).join('')
+            : '';
+        const recovered = suffix ? parseContinuationPayload(continuationRaw, suffix, allowText, schema) : null;
+        if (recovered?.parsed) {
+            continuationRaw = continuationPrefixForIncompleteResponse(recovered.raw, recovered.parsed, schema);
+            continuationDraft.mes = continuationRaw;
+            ctx.chat.splice(continuationDraftIndex + 1, trailing.length);
+            await ctx.saveChat?.();
+            if (hasGeneratedShape(recovered.parsed, schema)
+                && !isLikelyTruncatedResponse(recovered.raw, recovered.parsed, schema)) {
+                clearContinuation(kind);
+                saveGenerationSnapshot(kind, { raw: recovered.raw });
+                return recovered.parsed;
+            }
+        }
+    }
+    if (continuationRaw && (!continuationDraft || continuationDraftIndex !== ctx.chat.length - 1 || continuationDraft.is_user)) {
+        throw new Error('无法在原楼层继续生成：截断草稿不是当前聊天最后一条 assistant 消息。请删除其后的消息后重试。');
     }
     const beforeLength = ctx.chat?.length || 0;
     const messagesBeforeGeneration = new Set(ctx.chat || []);
     let generated;
     let generatedMessages = [];
+    let returnedGenerationText = '';
     let temporaryUserMessage = null;
     const textarea = document.getElementById('send_textarea');
     const pendingUserInput = textarea?.value || '';
@@ -3101,11 +3204,10 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
             textarea.value = '';
             textarea.dispatchEvent(new Event('input', { bubbles: true }));
         }
-        // In ST 1.17, an empty normal request can remove the previous
-        // assistant message before generating. A hidden-in-memory user anchor
-        // makes the request an ordinary turn; it is removed immediately after
-        // generation and is never retained in the chat.
-        if (Array.isArray(ctx.chat)) {
+        // First-pass foreground generation needs an in-memory user anchor so
+        // ST does not replace the preceding assistant turn. Native `continue`
+        // appends directly to the retained structured draft.
+        if (!continuationRaw && Array.isArray(ctx.chat)) {
             temporaryUserMessage = {
                 name: ctx.name1 || 'User',
                 is_user: true,
@@ -3114,20 +3216,23 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
             };
             ctx.chat.push(temporaryUserMessage);
         }
-        const result = await ctx.generate('normal', {
+        const result = await ctx.generate(continuationRaw ? 'continue' : 'normal', {
             quiet_prompt: `${prompt}${schemaInstruction}${continuationInstruction}\n涉及成人内容时，参与者必须是成年人。`,
             quietToLoud: true,
             skipWIAN: true,
             force_name2: true,
         });
+        returnedGenerationText = extractAssistantContent(result).trim() || extractGeneratedText(result).trim();
         if (requestEpoch !== generationEpoch) {
             const error = new Error('当前工作台已清理，旧请求结果已丢弃。');
             error.sosStale = true;
             throw error;
         }
-        generated = (ctx.chat || []).slice(beforeLength)
-            .filter(message => !message.is_user && text(message?.mes))
-            .at(-1);
+        generated = continuationRaw
+            ? findStructuredDraft(draftToken, continuationDraftIndex) || continuationDraft
+            : (ctx.chat || []).slice(beforeLength)
+                .filter(message => !message.is_user && text(message?.mes))
+                .at(-1);
         generatedMessages = (ctx.chat || []).filter(message => !messagesBeforeGeneration.has(message)
             && !message.is_user
             && text(message?.mes));
@@ -3135,8 +3240,7 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
         // hook adds a message. It is still a valid parse source, although it
         // cannot be marked as a retained draft until the adapter saves it.
         if (!generated && result !== undefined) {
-            const returned = extractAssistantContent(result).trim() || extractGeneratedText(result).trim();
-            if (returned) generated = { mes: returned, extra: {} };
+            if (returnedGenerationText) generated = { mes: returnedGenerationText, extra: {} };
         }
     } catch (error) {
         const wrapped = wrapGenerationError(error);
@@ -3148,13 +3252,7 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
             const temporaryIndex = ctx.chat.indexOf(temporaryUserMessage);
             if (temporaryIndex >= 0) ctx.chat.splice(temporaryIndex, 1);
         }
-        if (continuationDraft && Array.isArray(ctx.chat) && !ctx.chat.includes(continuationDraft)) {
-            const insertionIndex = Number.isInteger(continuationDraftIndex) && continuationDraftIndex >= 0
-                ? Math.min(continuationDraftIndex, ctx.chat.length)
-                : ctx.chat.length;
-            ctx.chat.splice(insertionIndex, 0, continuationDraft);
-        }
-        if (temporaryUserMessage || continuationDraft) {
+        if (temporaryUserMessage) {
             try {
                 await ctx.saveChat?.();
             } catch (error) {
@@ -3169,8 +3267,26 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
         updateContinuityPrompt();
     }
 
-    const continuationText = text(generated?.mes);
-    let raw = continuationRaw ? `${continuationRaw}${continuationText}` : continuationText;
+    const generatedText = text(generated?.mes);
+    const generatedMessageText = generatedMessages
+        .filter(message => message !== generated)
+        .map(message => text(message?.mes))
+        .filter(Boolean)
+        .join('');
+    // Depending on the active SillyTavern adapter, native `continue` either
+    // mutates the original message, returns text without saving it, or creates
+    // one or more new assistant messages. Read all three shapes, but use only
+    // one suffix source so the continuation cannot be duplicated.
+    const continuationText = continuationRaw
+        ? (generatedText !== text(continuationRaw)
+            ? generatedText
+            : generatedMessageText || returnedGenerationText)
+        : generatedText;
+    let raw = continuationRaw
+        ? (continuationText.startsWith(text(continuationRaw))
+            ? continuationText
+            : parseContinuationPayload(continuationRaw, continuationText, allowText, schema).raw)
+        : generatedText;
     if (!generated || !raw) {
         const error = new Error('酒馆请求已完成，但没有写入结构化草稿消息。请检查 API 响应和酒馆控制台。');
         saveGenerationSnapshot(kind, { error: error.message });
@@ -3189,9 +3305,12 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
     let resolvedRaw = raw;
     let parsed;
     if (continuationRaw) {
-        const resolved = parseContinuationPayload(continuationRaw, continuationText, allowText, schema);
-        resolvedRaw = resolved.raw;
-        parsed = resolved.parsed;
+        parsed = parseGeneratedPayload(raw, allowText, schema);
+        if (!parsed) {
+            const resolved = parseContinuationPayload(continuationRaw, continuationText, allowText, schema);
+            resolvedRaw = resolved.raw;
+            parsed = resolved.parsed;
+        }
     } else {
         parsed = parseGeneratedPayload(raw, allowText, schema);
     }
@@ -3456,7 +3575,7 @@ async function generateOutline(feedback = '', mode = 'new', continuation = null)
         const revision = mode === 'revise'
             ? `\n用户修改意见：${feedback}\n这是基于当前大纲的修改。必须保留未被意见点名的段落、人物事实、关键词落实方式和结局方向；已完成剧情绝不能改写，只调整未完成部分。${state.currentTurn > 0 ? '当前已经跑过部分剧情：请把已发生事件视为不可修改的历史，只重新规划未完成部分，并让新大纲从最近消息自然接上，不得跳到结局或后日谈。' : ''}无论修改了几个段落，都必须重新输出一份完整的五段大纲和全部元数据，包含开端、发展、转折、高潮、结局、主要角色名、NPC 功能、NSFW 节点和硬性规则，不能只返回修改部分，也不能使用 outline_patch。`
             : '';
-        const prompt = `${basePrompt()}\n任务：生成一份${length.label}小说剧情大纲。短篇、中篇、长篇只表示整体篇幅倾向、事件密度和推进节奏，不是硬性字数上限；工作台不会从 AI 返回的大纲中截断任何内容。必须按“开端、发展、转折、高潮、结局、主要角色名、主要 NPC 功能、NSFW 节点、硬性规则”的顺序，完整输出这五段剧情和全部元数据；不能省略高潮或结局，不能把所有内容塞入单一 outline 字段。先完整规划起承转合、因果链、高潮和明确结局，再控制叙述密度。不得使用“……”或"..."代替未完成内容，不得因为篇幅省略结局、因果链、关键词落实或 NSFW 节点。每个剧情段控制在 300-450 个汉字以内；主要 NPC 功能、NSFW 节点、硬性规则各列 3-6 项，每项控制在 80-140 个汉字以内。不要把 NPC 完整人设、NSFW 细节或硬性规则塞进开端、发展、转折、高潮、结局。严格落实所有已选背景、关系、基调、结局、情节关键词和特别要求，不得自行删掉标签。必须在 characterNames（主要角色名）中列出当前 user 和每一名主要 NPC 的最终姓名，不能只写“user”“NPC”或职能。${nsfwRule}\n所有人物必须明确为成年人，性行为必须发生在成年人之间并符合用户设定。${identityRule}${previous}${novelty}${revision}${storyContinuation}${openingContext}\n必须使用完整的 <outline> 标签协议返回，不要返回 JSON；标签内依次填写“开端：...\n发展：...\n转折：...\n高潮：...\n结局：...\n主要角色名：...\n主要 NPC 功能：...\nNSFW 节点：...\n硬性规则：...”。`;
+        const prompt = `${basePrompt()}\n任务：生成一份${length.label}小说剧情大纲。短篇、中篇、长篇只表示整体篇幅倾向、事件密度和推进节奏，不是硬性字数上限；工作台不会从 AI 返回的大纲中截断任何内容。必须按“开端、发展、转折、高潮、结局、主要角色名、主要 NPC 功能、NSFW 节点、硬性规则”的顺序，完整输出这五段剧情和全部元数据；不能省略高潮或结局，不能把所有内容塞入单一 outline 字段。先完整规划起承转合、因果链、高潮和明确结局，再控制叙述密度。不得使用“……”或"..."代替未完成内容，不得因为篇幅省略结局、因果链、关键词落实或 NSFW 节点。每个剧情段控制在 300-450 个汉字以内；主要 NPC 功能、NSFW 节点、硬性规则各列 3-6 项，每项控制在 80-140 个汉字以内。主要 NPC 功能必须为每名 NPC 各写一项，并严格使用“姓名｜性格：完整核心性格原文｜身份/剧情功能：内容”的格式；这里确定的姓名和性格会在后续 NPC 人设生成时被程序锁定，禁止遗漏、简称或互换。不要把 NPC 完整人设、NSFW 细节或硬性规则塞进开端、发展、转折、高潮、结局。严格落实所有已选背景、关系、基调、结局、情节关键词和特别要求，不得自行删掉标签。必须在 characterNames（主要角色名）中列出当前 user 和每一名主要 NPC 的最终姓名，不能只写“user”“NPC”或职能。${nsfwRule}\n所有人物必须明确为成年人，性行为必须发生在成年人之间并符合用户设定。${identityRule}${previous}${novelty}${revision}${storyContinuation}${openingContext}\n必须使用完整的 <outline> 标签协议返回，不要返回 JSON；标签内依次填写“开端：...\n发展：...\n转折：...\n高潮：...\n结局：...\n主要角色名：...\n主要 NPC 功能：姓名｜性格：...｜身份/剧情功能：...\nNSFW 节点：...\n硬性规则：...”。`;
         // Leave enough upstream output budget for a complete five-part outline
         // and its metadata. The selected length is a pacing hint, not a token
         // ceiling, and the local formatter no longer truncates the response.
@@ -3564,31 +3683,19 @@ async function generateNpcs(feedback = '', mode = 'new', continuation = null) {
             ? `\n当前 NPC 草稿（本次重生成的基线；除非用户明确要求，不要改变姓名、身份、核心性格、关系和说话方式）：${JSON.stringify(state.npcs)}`
             : '\n当前没有 NPC 草稿，请根据大纲生成全部主要 NPC。';
         const currentName = currentUserName();
-        const lockedNpcNames = mode === 'reroll-locked'
-            ? unique((state.npcs.length ? state.npcs.map(npc => npc.name) : outlineNpcNames(state.outlineData))
-                .filter(name => canonicalText(name) && canonicalText(name) !== canonicalText(currentName)))
-            : mode === 'revise'
-                ? unique(state.npcs.map(npc => npc.name).filter(name => canonicalText(name)))
-                : [];
-        const previousNames = unique([
-            ...currentStoryNpcNames(),
-            currentName,
-            ...historicalUserNames(),
-        ]);
-        const novelty = mode === 'new'
-            ? `\n这是全新 NPC 阵容，不是对当前草稿换词。随机生成标识：${generationNonce('npc')}。每名 NPC 必须采用全新的姓名，严禁使用以下历史姓名或其同音/近似写法：${previousNames.join('、') || '暂无'}。NPC 姓名不得等于当前 user“${currentName || '未命名'}”。人物身份、核心矛盾、外貌辨识度和说话方式也要与历史阵容明显不同。`
-            : '';
-        const lockedNamesRule = lockedNpcNames.length
-            ? `\n本次不是换人名操作。当前 NPC 姓名是锁定字段，必须逐字使用以下姓名，并按照这个顺序返回：${lockedNpcNames.join('、')}。禁止改名、换同音字、使用别名代替、添加或删除 NPC；每名 NPC 的性格、身份、关系和说话方式必须与当前大纲中对应姓名的角色功能一致。即使模型原本想生成其他姓名，最终 name 也必须是上述锁定姓名。`
-            : '';
+        const outlineConstraints = outlineNpcConstraints(state.outlineData);
+        const lockedNpcNames = outlineConstraints.map(item => item.name);
+        if (!lockedNpcNames.length) throw new Error('当前大纲没有可识别的 NPC 姓名，无法生成一一对应的 NPC 人设。请先在大纲“主要角色名”中列出 user 与全部 NPC 的姓名。');
+        const outlineConstraintText = outlineConstraints.map(item => {
+            const personality = item.personality ? `；锁定性格原文：${item.personality}` : '';
+            return `${item.name}${personality}；大纲相关原文：${item.source || '大纲只列出了姓名，其他设定须从完整大纲中判断'}`;
+        }).join('\n');
+        const lockedNamesRule = `\n大纲是 NPC 姓名和核心性格的唯一权威来源。必须严格生成 ${lockedNpcNames.length} 名 NPC，并按照以下顺序逐字使用姓名：${lockedNpcNames.join('、')}。禁止改名、换同音字、拿别名替代 name、添加或删除 NPC。每名 NPC 的 personality 必须与大纲对该姓名的性格描述完全一致，不得反转、弱化、改写成冲突性格或把甲的设定给乙；大纲明确写有“性格：”时必须逐字复制其值。逐人约束如下：\n${outlineConstraintText}`;
         const revision = mode === 'revise'
             ? `\n用户 NPC 修改意见：${feedback}\n这是基于当前 NPC 草稿的修改。只修改意见明确点名的 NPC、字段或内容；未点名的 NPC 以及未点名字段必须保持原值，尤其是姓名、身份、核心性格、关系、说话方式和已确认的成年人年龄。无论修改了几个字段，都必须重新输出全部 NPC 的完整结果，每名 NPC 都要包含全部字段，不能只返回修改部分，也不能使用 npc_patch。`
             : '';
-        const npcCountRule = state.config.relationshipMode === 'NP'
-            ? '关系数量为 NP：生成所有承担主要关系线、冲突线或 NSFW 节点的主要 NPC，至少 2 人；不要只返回一个代表角色。'
-            : '关系数量为 1V1：生成 1 名主要恋爱 NPC；只有在大纲明确需要且对主线有作用时，才额外生成少量功能 NPC。';
-        const npcSchema = { type: 'object', properties: { npcs: { type: 'array', minItems: state.config.relationshipMode === 'NP' && mode === 'new' ? 2 : 1, items: { type: 'object', properties: { name: { type: 'string' }, aliases: { type: 'array', items: { type: 'string' } }, gender: { type: 'string' }, age: { type: 'string' }, height: { type: 'string' }, appearance: { type: 'string' }, personality: { type: 'string' }, identity: { type: 'string' }, past: { type: 'string' }, relationship: { type: 'string' }, attitude: { type: 'string' }, quotes: { type: 'array', items: { type: 'string' } }, nsfw: { type: 'string' }, body: { type: 'string' } }, required: ['name', 'aliases', 'gender', 'age', 'height', 'appearance', 'personality', 'identity', 'past', 'relationship', 'attitude', 'quotes', 'nsfw', 'body'] } } }, required: ['npcs'] };
-        const prompt = `${basePrompt()}\n当前 user 唯一姓名：${currentName || '尚未确定'}。NPC 与 user 的关系必须匹配这个姓名，不得把旧 user 人设、旧聊天或参考资料中的其他人当作当前 user。\n已接受的大纲：${state.outline}\n请生成该大纲所需的全部主要 NPC。${npcCountRule}必须返回至少 1 人且每个字段完整；如果大纲包含成人内容，相关 NPC 的年龄字段必须明确为成年人。严格按以下顺序输出每一名 NPC，第一行必须是 name（姓名）：name、aliases（称呼/关键词）、gender、age、height、appearance、personality、identity、past、relationship、attitude、quotes、nsfw、body。没有完成一个 NPC 的全部字段前，不得开始下一个 NPC。先简洁、完整地写完所有 NPC，再补充细节；不得用省略号或“内容已截断”代替字段。每名 NPC 都必须单独使用完整的 <npc>...</npc>，最后闭合 </npcs>。不得输出分析、解释、前言或 Markdown。外貌要有至少两条可识别细节，不能都是模板化帅哥美女；性格必须能从身份和过去经历合理推出，不能自相矛盾。NSFW 字段只写成年角色的偏好、体位和语言风格，不改变人物性格。关键词必须覆盖姓名、昵称、去姓名、user 对其特殊称呼。${previous}${novelty}${lockedNamesRule}${revision}\n如果无法返回 JSON，请使用 <npcs><npc>字段：内容</npc></npcs>，不要解释。`;
+        const npcSchema = { type: 'object', properties: { npcs: { type: 'array', minItems: lockedNpcNames.length, maxItems: lockedNpcNames.length, items: { type: 'object', properties: { name: { type: 'string' }, aliases: { type: 'array', items: { type: 'string' } }, gender: { type: 'string' }, age: { type: 'string' }, height: { type: 'string' }, appearance: { type: 'string' }, personality: { type: 'string' }, identity: { type: 'string' }, past: { type: 'string' }, relationship: { type: 'string' }, attitude: { type: 'string' }, quotes: { type: 'array', items: { type: 'string' } }, nsfw: { type: 'string' }, body: { type: 'string' } }, required: ['name', 'aliases', 'gender', 'age', 'height', 'appearance', 'personality', 'identity', 'past', 'relationship', 'attitude', 'quotes', 'nsfw', 'body'] } } }, required: ['npcs'] };
+        const prompt = `${basePrompt()}\n当前 user 唯一姓名：${currentName || '尚未确定'}。NPC 与 user 的关系必须匹配这个姓名，不得把旧 user 人设、旧聊天或参考资料中的其他人当作当前 user。\n已接受的大纲：${state.outline}\n请只根据该大纲生成全部主要 NPC。必须返回恰好 ${lockedNpcNames.length} 人且每个字段完整；如果大纲包含成人内容，相关 NPC 的年龄字段必须明确为成年人。严格按以下顺序输出每一名 NPC，第一行必须是 name（姓名）：name、aliases（称呼/关键词）、gender、age、height、appearance、personality、identity、past、relationship、attitude、quotes、nsfw、body。没有完成一个 NPC 的全部字段前，不得开始下一个 NPC。先简洁、完整地写完所有 NPC，再补充细节；不得用省略号或“内容已截断”代替字段。每名 NPC 都必须单独使用完整的 <npc>...</npc>，最后闭合 </npcs>。不得输出分析、解释、前言或 Markdown。外貌要有至少两条可识别细节，不能都是模板化帅哥美女；性格必须能从身份和过去经历合理推出，不能自相矛盾。NSFW 字段只写成年角色的偏好、体位和语言风格，不改变人物性格。关键词必须覆盖姓名、昵称、去姓名、user 对其特殊称呼。${previous}${lockedNamesRule}${revision}\n如果无法返回 JSON，请使用 <npcs><npc>字段：内容</npc></npcs>，不要解释。`;
         const result = await generateStructured(
             prompt,
             npcSchema,
@@ -3614,26 +3721,17 @@ async function generateNpcs(feedback = '', mode = 'new', continuation = null) {
             throw new Error('AI 没有返回主要 NPC，请重试；当前 NPC 草稿已保留。');
         }
 
-        nextNpcs = normalizeNpcCollection(nextNpcs);
-        if (mode === 'reroll-locked') {
-            const locked = lockNpcNames(nextNpcs, lockedNpcNames);
-            if (!locked) throw new Error('NPC 重 roll 返回的人数与当前大纲角色不一致，已保留原 NPC；请重试。');
-            nextNpcs = locked;
+        nextNpcs = lockNpcsToOutline(normalizeNpcCollection(nextNpcs), state.outlineData);
+        if (!nextNpcs) {
+            throw new Error(`AI 返回的 NPC 人数与大纲不一致。大纲要求 ${lockedNpcNames.length} 人（${lockedNpcNames.join('、')}），已保留原 NPC；请继续生成完整内容或重试。`);
         }
-        const collisionNames = mode === 'reroll-locked' ? [currentName] : mode === 'new' ? previousNames : [currentName];
-        if (npcNameCollision(nextNpcs, collisionNames)) {
-            throw new Error('NPC 姓名存在重复、沿用历史角色或与当前 user 重名，已拒绝写入；当前 NPC 草稿未被覆盖。');
+        if (npcNameCollision(nextNpcs, [currentName])) {
+            throw new Error('大纲中的 NPC 姓名存在重复或与当前 user 重名，已拒绝写入；请先修正大纲角色名单。');
         }
         if (state.config.relationshipMode === 'NP' && nextNpcs.length < 2) {
             throw new Error('NP 模式必须生成至少 2 名互不重复的主要 NPC，当前结果已拒绝写入。');
         }
         state.npcs = nextNpcs;
-        if (mode === 'new') {
-            state.npcNameHistory = unique([
-                ...state.npcNameHistory,
-                ...nextNpcs.flatMap(npc => [npc.name, ...npc.aliases]),
-            ]).slice(-80);
-        }
         state.npcsAccepted = false;
         saveState();
         activeStage = 'npc';
