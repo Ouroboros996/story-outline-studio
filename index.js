@@ -2231,6 +2231,60 @@ function extractJson(value) {
     return null;
 }
 
+function parseLooseOutlineObject(value) {
+    const source = stripReasoningBlocks(text(value)).trim();
+    if (!source) return null;
+    const aliases = {
+        opening: 'opening', 开端: 'opening', 开场: 'opening',
+        development: 'development', 发展: 'development',
+        turningPoint: 'turningPoint', turning_point: 'turningPoint', turningpoint: 'turningPoint', 转折: 'turningPoint', 反转: 'turningPoint',
+        climax: 'climax', 高潮: 'climax', 决战: 'climax',
+        ending: 'ending', end: 'ending', 结局: 'ending', 收束: 'ending',
+        characterNames: 'characterNames', character_names: 'characterNames', 主要角色名: 'characterNames', 角色名: 'characterNames',
+        npcFunctions: 'npcFunctions', npc_functions: 'npcFunctions', 主要NPC功能: 'npcFunctions', '主要 NPC 功能': 'npcFunctions',
+        nsfwNodes: 'nsfwNodes', nsfw_nodes: 'nsfwNodes', 'NSFW节点': 'nsfwNodes', 'NSFW 节点': 'nsfwNodes',
+        hardRules: 'hardRules', hard_rules: 'hardRules', 硬性规则: 'hardRules',
+    };
+    const names = Object.keys(aliases).sort((a, b) => b.length - a.length)
+        .map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+    // Claude occasionally emits a JSON-looking object with a trailing comma,
+    // single-quoted values, or an unescaped quote in a long Chinese string.
+    // Locate only object-like field labels and recover each value independently
+    // so one malformed field does not discard all the other valid sections.
+    const matcher = new RegExp('(?:^|[,{]\\s*)(?:["\'“”]?\\s*)(' + names + ')(?:\\s*["\'“”]?\\s*):', 'giu');
+    const matches = [...source.matchAll(matcher)];
+    if (!matches.length) return null;
+    const result = {};
+    const cleanString = raw => {
+        let chunk = raw.trim().replace(/^[,\\s]+/u, '').replace(/[,}\\s]+$/u, '').trim();
+        if ((chunk.startsWith('"') && chunk.endsWith('"')) || (chunk.startsWith("'") && chunk.endsWith("'")) || (chunk.startsWith('“') && chunk.endsWith('”'))) {
+            chunk = chunk.slice(1, -1);
+        }
+        try { return JSON.parse(`"${chunk.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`); } catch { return chunk; }
+    };
+    const parseList = raw => {
+        const chunk = raw.trim().replace(/^[,\\s]+/u, '').replace(/[,}\\s]+$/u, '').trim();
+        const body = chunk.startsWith('[') && chunk.endsWith(']') ? chunk.slice(1, -1) : chunk;
+        try {
+            const parsed = JSON.parse(`[${body.replace(/,\\s*([\\]}])/g, '$1')}]`);
+            if (Array.isArray(parsed)) return parsed.map(item => text(item)).filter(Boolean);
+        } catch { /* recover quoted list items below */ }
+        const quoted = [...body.matchAll(/"((?:\\\\.|[^"\\\\])*)"|'([^']*)'/gu)]
+            .map(match => match[1] ?? match[2]).map(text).filter(Boolean);
+        return quoted.length ? quoted : body.split(/[,，、\\n]/u).map(item => cleanString(item)).filter(Boolean);
+    };
+    for (const [index, match] of matches.entries()) {
+        const key = aliases[match[1]];
+        const start = match.index + match[0].length;
+        const end = matches[index + 1]?.index ?? source.length;
+        const raw = source.slice(start, end).trim();
+        if (!key || !raw) continue;
+        if (['characterNames', 'npcFunctions', 'nsfwNodes', 'hardRules'].includes(key)) result[key] = parseList(raw);
+        else result[key] = cleanString(raw);
+    }
+    return Object.keys(result).length ? result : null;
+}
+
 function extractAssistantContent(value) {
     if (value === null || value === undefined) return '';
     if (typeof value === 'string' || value instanceof String) return String(value);
@@ -2501,6 +2555,22 @@ function hasGeneratedShape(parsed, schema) {
     return true;
 }
 
+function continuationPrefixForIncompleteResponse(raw, parsed, schema) {
+    const source = stripReasoningBlocks(raw).trim();
+    if (!source || hasGeneratedShape(parsed, schema) || !schema?.properties?.opening) return source;
+
+    if (/^<outline\b[^>]*>[\s\S]*<\/outline>\s*$/iu.test(source)) {
+        return source.replace(/<\/outline>\s*$/iu, '\n');
+    }
+
+    const fenced = source.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/iu);
+    const body = (fenced?.[1] || source).trim();
+    if (/^\{[\s\S]*\}$/u.test(body)) {
+        return `${body.slice(0, -1).replace(/,\s*$/u, '').trimEnd()},\n`;
+    }
+    return source;
+}
+
 function countTag(raw, tag, closing = false) {
     const pattern = closing ? new RegExp(`<\\/${tag}\\s*>`, 'giu') : new RegExp(`<${tag}(?:\\s|>)`, 'giu');
     return [...text(raw).matchAll(pattern)].length;
@@ -2706,6 +2776,11 @@ function parseGeneratedPayload(raw, allowText = false, schema = null) {
     const parsed = extractJson(source);
     if (parsed && !(typeof parsed === 'object' && !Object.keys(parsed).length)) return normalizeGeneratedResult(parsed, schema);
 
+    if (schema?.properties?.opening) {
+        const looseOutline = parseLooseOutlineObject(source);
+        if (looseOutline) return normalizeGeneratedResult(looseOutline, schema);
+    }
+
     // Some gateways/models ignore both JSON and the tag fallback and return a
     // plain Chinese field list. Convert that list before treating the result
     // as unusable. This is the same useful text that would otherwise be found
@@ -2845,12 +2920,17 @@ async function generateJson(prompt, schema, responseLength = 1200, { allowText =
     // Read the assistant body back from SillyTavern and parse it locally. The
     // core structured-output path may turn a valid tag/plain-text response
     // into an empty object before an extension gets to inspect it.
-    const fullTag = schema?.properties?.npcs ? '<npcs><npc>每个字段一行：内容</npc></npcs>' : schema?.properties?.name && !schema?.properties?.opening ? '<persona>每个字段一行：内容</persona>' : '<outline>开端：...\n发展：...\n转折：...\n高潮：...\n结局：...</outline>';
+    const fullTag = schema?.properties?.npcs ? '<npcs><npc>每个字段一行：内容</npc></npcs>' : schema?.properties?.name && !schema?.properties?.opening ? '<persona>每个字段一行：内容</persona>' : '<outline>开端：...\n发展：...\n转折：...\n高潮：...\n结局：...\n主要角色名：...\n主要 NPC 功能：...\nNSFW 节点：...\n硬性规则：...</outline>';
     const patchProtocol = patchTag
         ? `本次是局部修改，只输出被修改的字段，不要重写未修改内容：<${patchTag}>字段：新内容</${patchTag}>。NPC 修改时使用 <npc_patch name="目标姓名">字段：新内容</npc_patch>。`
-        : `请优先使用下面的纯文本标签协议返回完整结果：${fullTag}`;
+        : schema?.properties?.opening
+            ? `大纲必须严格使用下面的纯文本标签协议，禁止返回 JSON、代码块或解释：${fullTag}。必须严格按“开端、发展、转折、高潮、结局、主要角色名、主要 NPC 功能、NSFW 节点、硬性规则”的顺序输出，五个剧情段和所有元数据都必须出现且各只出现一次。每个剧情段最多 700 个汉字；主要 NPC 功能、NSFW 节点、硬性规则每项最多 180 个汉字，分别最多 8 项。不要把 NPC 完整人设、NSFW 细节或硬性规则塞进剧情段。`
+            : `请优先使用下面的纯文本标签协议返回完整结果：${fullTag}`;
     const generationSchema = getGenerationSchema(schema, patchTag);
-    const schemaInstruction = `\n字段参考（不要输出 schema）：${JSON.stringify(generationSchema)}\n${patchProtocol}不要输出解释、Markdown 或思维链。若你能稳定返回 JSON，也可以返回单个 JSON 对象。`;
+    const outputFormatRule = schema?.properties?.opening && !patchTag
+        ? '不要输出解释、Markdown、思维链或 JSON，只能输出一个完整的 <outline> 标签块。'
+        : '不要输出解释、Markdown 或思维链。若你能稳定返回 JSON，也可以返回单个 JSON 对象。';
+    const schemaInstruction = `\n字段参考（不要输出 schema）：${JSON.stringify(generationSchema)}\n${patchProtocol}${outputFormatRule}`;
     const continuationInstruction = continuationRaw
         ? `\n这是上一次同一结构化响应的续写请求。下面是已经收到的完整前文，请从前文最后一个字符之后继续输出，禁止重复前文、禁止重新输出开头标签、禁止输出解释或 Markdown；只输出缺失的后半段，直到完整闭合所有标签和字段。\n<already_received>\n${continuationRaw}\n</already_received>\n`
         : '';
@@ -2908,6 +2988,7 @@ async function generateJson(prompt, schema, responseLength = 1200, { allowText =
     }
     const truncated = isLikelyTruncatedResponse(raw, parsed, schema);
     if (truncated) {
+        raw = continuationPrefixForIncompleteResponse(raw, parsed, schema);
         const token = text(draftToken) || generationNonce(`${kind}-draft`);
         const draft = await retainStructuredDraft(raw, kind, token, Number(draftIndex));
         saveContinuation(kind, raw, prompt, schema, responseLength, { allowText, patchTag, continuationMeta, draftToken: draft.token, draftIndex: draft.index });
@@ -2935,12 +3016,17 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
     // processor. A foreground request is the only honest way to expose native
     // streaming, so its structured draft is intentionally retained in chat.
     const requestEpoch = generationEpoch;
-    const fullTag = schema?.properties?.npcs ? '<npcs><npc>每个字段一行：内容</npc></npcs>' : schema?.properties?.name && !schema?.properties?.opening ? '<persona>每个字段一行：内容</persona>' : '<outline>开端：...\n发展：...\n转折：...\n高潮：...\n结局：...</outline>';
+    const fullTag = schema?.properties?.npcs ? '<npcs><npc>每个字段一行：内容</npc></npcs>' : schema?.properties?.name && !schema?.properties?.opening ? '<persona>每个字段一行：内容</persona>' : '<outline>开端：...\n发展：...\n转折：...\n高潮：...\n结局：...\n主要角色名：...\n主要 NPC 功能：...\nNSFW 节点：...\n硬性规则：...</outline>';
     const patchProtocol = patchTag
         ? `本次是局部修改，只输出被修改的字段，不要重写未修改内容：<${patchTag}>字段：新内容</${patchTag}>。NPC 修改时使用 <npc_patch name="目标姓名">字段：新内容</npc_patch>。`
-        : `请优先使用下面的纯文本标签协议返回完整结果：${fullTag}`;
+        : schema?.properties?.opening
+            ? `大纲必须严格使用下面的纯文本标签协议，禁止返回 JSON、代码块或解释：${fullTag}。必须严格按“开端、发展、转折、高潮、结局、主要角色名、主要 NPC 功能、NSFW 节点、硬性规则”的顺序输出，五个剧情段和所有元数据都必须出现且各只出现一次。每个剧情段最多 700 个汉字；主要 NPC 功能、NSFW 节点、硬性规则每项最多 180 个汉字，分别最多 8 项。不要把 NPC 完整人设、NSFW 细节或硬性规则塞进剧情段。`
+            : `请优先使用下面的纯文本标签协议返回完整结果：${fullTag}`;
     const generationSchema = getGenerationSchema(schema, patchTag);
-    const schemaInstruction = `\n字段参考（不要输出 schema）：${JSON.stringify(generationSchema)}\n${patchProtocol}不要输出解释、Markdown 或思维链。若你能稳定返回 JSON，也可以返回单个 JSON 对象。`;
+    const outputFormatRule = schema?.properties?.opening && !patchTag
+        ? '不要输出解释、Markdown、思维链或 JSON，只能输出一个完整的 <outline> 标签块。'
+        : '不要输出解释、Markdown 或思维链。若你能稳定返回 JSON，也可以返回单个 JSON 对象。';
+    const schemaInstruction = `\n字段参考（不要输出 schema）：${JSON.stringify(generationSchema)}\n${patchProtocol}${outputFormatRule}`;
     const continuationInstruction = continuationRaw
         ? `\n这是上一次同一结构化响应的续写请求。已有前文如下，请从最后一个字符之后继续，只输出缺失后半段，不要重复前文或重新输出开头标签，直到完整闭合结构：\n<already_received>\n${continuationRaw}\n</already_received>\n`
         : '';
@@ -3050,12 +3136,14 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
     if (resolvedRaw !== raw) raw = resolvedRaw;
     const truncated = isLikelyTruncatedResponse(raw, parsed, schema);
     if (truncated) {
+        raw = continuationPrefixForIncompleteResponse(raw, parsed, schema);
         const token = text(draftToken) || generationNonce(`${kind}-draft`);
         let currentDraftIndex = Number(draftIndex);
         if (continuationRaw) {
             const draft = await replaceStructuredDraft(generated, raw, { kind, draftToken: token, draftIndex: currentDraftIndex });
             currentDraftIndex = draft ? ctx.chat.indexOf(draft) : currentDraftIndex;
         } else if (generated && (ctx.chat || []).includes(generated)) {
+            generated.mes = raw;
             generated.extra = {
                 ...(generated.extra || {}),
                 storyOutlineStudioDraft: { kind, token, at: Date.now() },
@@ -3282,7 +3370,7 @@ async function generateOutline(feedback = '', mode = 'new', continuation = null)
         const revision = mode === 'revise'
             ? `\n用户修改意见：${feedback}\n这是基于当前大纲的修改。必须保留未被意见点名的段落、人物事实、关键词落实方式和结局方向；已完成剧情绝不能改写，只调整未完成部分。${state.currentTurn > 0 ? '当前已经跑过部分剧情：请把已发生事件视为不可修改的历史，只重新规划未完成部分，并让新大纲从最近消息自然接上，不得跳到结局或后日谈。' : ''}无论修改了几个段落，都必须重新输出一份完整的五段大纲和全部元数据，包含开端、发展、转折、高潮、结局、主要角色名、NPC 功能、NSFW 节点和硬性规则，不能只返回修改部分，也不能使用 outline_patch。`
             : '';
-        const prompt = `${basePrompt()}\n任务：生成一份${length.label}小说剧情大纲。短篇、中篇、长篇只表示整体篇幅倾向、事件密度和推进节奏，不是硬性字数上限；工作台不会从 AI 返回的大纲中截断任何内容。输出必须包含开端、发展、转折、高潮、结局五段，按这五段分别填写字段，不能把所有内容塞入单一 outline 字段。先完整规划起承转合、因果链、高潮和明确结局，再控制叙述密度。不得使用“……”或"..."代替未完成内容，不得因为篇幅省略结局、因果链、关键词落实或 NSFW 节点。每段都要简洁但必须有具体事件、因果和结局。严格落实所有已选背景、关系、基调、结局、情节关键词和特别要求，不得自行删掉标签。另列出主要 NPC 功能、NSFW 节点、硬性规则。必须在 characterNames（主要角色名）中列出当前 user 和每一名主要 NPC 的最终姓名，不能只写“user”“NPC”或职能。${nsfwRule}\n所有人物必须明确为成年人，性行为必须发生在成年人之间并符合用户设定。${identityRule}${previous}${novelty}${revision}${storyContinuation}${openingContext}\n若无法返回 JSON，请使用纯文本标签：<outline>内含“开端：...\n发展：...\n转折：...\n高潮：...\n结局：...”</outline>，并另写“主要角色名：user姓名、全部主要 NPC 姓名”。`;
+        const prompt = `${basePrompt()}\n任务：生成一份${length.label}小说剧情大纲。短篇、中篇、长篇只表示整体篇幅倾向、事件密度和推进节奏，不是硬性字数上限；工作台不会从 AI 返回的大纲中截断任何内容。必须按“开端、发展、转折、高潮、结局、主要角色名、主要 NPC 功能、NSFW 节点、硬性规则”的顺序，完整输出这五段剧情和全部元数据；不能省略高潮或结局，不能把所有内容塞入单一 outline 字段。先完整规划起承转合、因果链、高潮和明确结局，再控制叙述密度。不得使用“……”或"..."代替未完成内容，不得因为篇幅省略结局、因果链、关键词落实或 NSFW 节点。每个剧情段控制在 300-450 个汉字以内；主要 NPC 功能、NSFW 节点、硬性规则各列 3-6 项，每项控制在 80-140 个汉字以内。不要把 NPC 完整人设、NSFW 细节或硬性规则塞进开端、发展、转折、高潮、结局。严格落实所有已选背景、关系、基调、结局、情节关键词和特别要求，不得自行删掉标签。必须在 characterNames（主要角色名）中列出当前 user 和每一名主要 NPC 的最终姓名，不能只写“user”“NPC”或职能。${nsfwRule}\n所有人物必须明确为成年人，性行为必须发生在成年人之间并符合用户设定。${identityRule}${previous}${novelty}${revision}${storyContinuation}${openingContext}\n必须使用完整的 <outline> 标签协议返回，不要返回 JSON；标签内依次填写“开端：...\n发展：...\n转折：...\n高潮：...\n结局：...\n主要角色名：...\n主要 NPC 功能：...\nNSFW 节点：...\n硬性规则：...”。`;
         // Leave enough upstream output budget for a complete five-part outline
         // and its metadata. The selected length is a pacing hint, not a token
         // ceiling, and the local formatter no longer truncates the response.
