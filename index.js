@@ -576,6 +576,13 @@ function outlineNpcNames(data) {
 
 function outlineNpcConstraints(data) {
     const normalized = normalizeOutlineData(data);
+    // `characterNames` is an outline display field and can contain prose
+    // fragments when a model formats the outline loosely. Only the explicit
+    // "主要 NPC 功能" rows are reliable enough for personality hints.
+    const explicitNames = unique(normalized.npcFunctions.map(item => {
+        const firstCell = text(item).split(/[|｜]/u)[0].trim();
+        return firstCell.replace(/^(?:NPC|角色|人物)\s*(?:\d+|[一二三四五六七八九十]+)?\s*[：:：]?\s*/iu, '').trim();
+    }).filter(name => name && !/^(?:user|用户|主要角色|NPC|角色|人物)$/iu.test(name)));
     const sections = [
         ...normalized.npcFunctions,
         ...normalized.hardRules,
@@ -585,7 +592,7 @@ function outlineNpcConstraints(data) {
         normalized.climax,
         normalized.ending,
     ].map(text).filter(Boolean);
-    return outlineNpcNames(normalized).map(name => {
+    return explicitNames.map(name => {
         const related = sections.filter(section => containsAnyName(section, [name]));
         let personality = '';
         for (const section of related) {
@@ -1389,9 +1396,10 @@ function expandNpcPersonality(core, candidate) {
     return `${lockedCore}；${generated}`;
 }
 
-function lockNpcsToOutline(npcs, outlineData) {
+function lockNpcsToOutline(npcs, outlineData, lockedNames = null) {
     const constraints = outlineNpcConstraints(outlineData);
-    const locked = lockNpcNames(npcs, constraints.map(item => item.name));
+    const names = unique(lockedNames || []);
+    const locked = names.length ? lockNpcNames(npcs, names) : normalizeNpcCollection(npcs);
     if (!locked) return null;
     return locked.map(npc => {
         const constraint = constraints.find(item => canonicalText(item.name) === canonicalText(npc.name));
@@ -3714,18 +3722,25 @@ async function generateNpcs(feedback = '', mode = 'new', continuation = null) {
             : '\n当前没有 NPC 草稿，请根据大纲生成全部主要 NPC。';
         const currentName = currentUserName();
         const outlineConstraints = outlineNpcConstraints(state.outlineData);
-        const lockedNpcNames = outlineConstraints.map(item => item.name);
-        if (!lockedNpcNames.length) throw new Error('当前大纲没有可识别的 NPC 姓名，无法生成一一对应的 NPC 人设。请先在大纲“主要角色名”中列出 user 与全部 NPC 的姓名。');
+        const existingNpcNames = unique(state.npcs.map(npc => text(npc?.name)).filter(Boolean));
+        const lockExistingNames = mode === 'reroll-locked' || mode === 'revise';
+        const lockedNpcNames = lockExistingNames ? existingNpcNames : [];
         const outlineConstraintText = outlineConstraints.map(item => {
             const personality = item.personality ? `；锁定性格原文：${item.personality}` : '';
             return `${item.name}${personality}；大纲相关原文：${item.source || '大纲只列出了姓名，其他设定须从完整大纲中判断'}`;
         }).join('\n');
-        const lockedNamesRule = `\n大纲是 NPC 姓名和核心性格的唯一权威来源。必须严格生成 ${lockedNpcNames.length} 名 NPC，并按照以下顺序逐字使用姓名：${lockedNpcNames.join('、')}。禁止改名、换同音字、拿别名替代 name、添加或删除 NPC。每名 NPC 的 personality 必须以大纲对应姓名后的核心性格为基础进行扩展：可以补充稳定的行为表现、心理动机、处事方式、关系中的反应和细节，但不得改变、否定、反转或弱化大纲的核心性格，也不能把甲的设定给乙。扩展后的 personality 必须保留大纲核心性格原文或其清晰含义；大纲明确写有“性格：”时，先写该核心性格，再补充扩展。逐人约束如下：\n${outlineConstraintText}`;
+        const lockedNamesRule = lockExistingNames
+            ? `\n本次基于已有 NPC 重 roll/修改。必须严格保留以下已有姓名并按原顺序返回：${lockedNpcNames.join('、')}。禁止改名、换同音字、拿别名替代 name、添加或删除已有 NPC。`
+            : '\nNPC 数量由你根据大纲、user 与 NPC 关系、剧情冲突和已选标签自行判断，不要从 characterNames 字段机械提取数量，也不要把剧情正文里的普通词语当作 NPC。只生成真正承担主要关系线、冲突线或关键剧情功能的 NPC。';
+        const outlineRule = outlineConstraintText
+            ? `\n大纲中的“主要 NPC 功能”是人物姓名和核心性格参考。每个被列出的 NPC 都要优先采用对应姓名，并以核心性格为基础扩展行为表现、心理动机、处事方式和关系反应；不得改变、否定、反转或弱化核心性格，也不能把甲的设定给乙。扩展后的 personality 要保留核心性格原文或清晰含义。参考如下：\n${outlineConstraintText}`
+            : '';
+        const npcCount = lockedNpcNames.length ? `恰好 ${lockedNpcNames.length}` : '由你判断合适数量的';
         const revision = mode === 'revise'
             ? `\n用户 NPC 修改意见：${feedback}\n这是基于当前 NPC 草稿的修改。只修改意见明确点名的 NPC、字段或内容；未点名的 NPC 以及未点名字段必须保持原值，尤其是姓名、身份、核心性格、关系、说话方式和已确认的成年人年龄。无论修改了几个字段，都必须重新输出全部 NPC 的完整结果，每名 NPC 都要包含全部字段，不能只返回修改部分，也不能使用 npc_patch。`
             : '';
-        const npcSchema = { type: 'object', properties: { npcs: { type: 'array', minItems: lockedNpcNames.length, maxItems: lockedNpcNames.length, items: { type: 'object', properties: { name: { type: 'string' }, aliases: { type: 'array', items: { type: 'string' } }, gender: { type: 'string' }, age: { type: 'string' }, height: { type: 'string' }, appearance: { type: 'string' }, personality: { type: 'string' }, identity: { type: 'string' }, past: { type: 'string' }, relationship: { type: 'string' }, attitude: { type: 'string' }, quotes: { type: 'array', items: { type: 'string' } }, nsfw: { type: 'string' }, body: { type: 'string' } }, required: ['name', 'aliases', 'gender', 'age', 'height', 'appearance', 'personality', 'identity', 'past', 'relationship', 'attitude', 'quotes', 'nsfw', 'body'] } } }, required: ['npcs'] };
-        const prompt = `${basePrompt()}\n当前 user 唯一姓名：${currentName || '尚未确定'}。NPC 与 user 的关系必须匹配这个姓名，不得把旧 user 人设、旧聊天或参考资料中的其他人当作当前 user。\n已接受的大纲：${state.outline}\n请只根据该大纲生成全部主要 NPC。必须返回恰好 ${lockedNpcNames.length} 人且每个字段完整；如果大纲包含成人内容，相关 NPC 的年龄字段必须明确为成年人。严格按以下顺序输出每一名 NPC，第一行必须是 name（姓名）：name、aliases（称呼/关键词）、gender、age、height、appearance、personality、identity、past、relationship、attitude、quotes、nsfw、body。没有完成一个 NPC 的全部字段前，不得开始下一个 NPC。先简洁、完整地写完所有 NPC，再补充细节；不得用省略号或“内容已截断”代替字段。每名 NPC 都必须单独使用完整的 <npc>...</npc>，最后闭合 </npcs>。不得输出分析、解释、前言或 Markdown。外貌要有至少两条可识别细节，不能都是模板化帅哥美女；性格必须能从身份和过去经历合理推出，不能自相矛盾。NSFW 字段只写成年角色的偏好、体位和语言风格，不改变人物性格。关键词必须覆盖姓名、昵称、去姓名、user 对其特殊称呼。${previous}${lockedNamesRule}${revision}\n如果无法返回 JSON，请使用 <npcs><npc>字段：内容</npc></npcs>，不要解释。`;
+        const npcSchema = { type: 'object', properties: { npcs: { type: 'array', ...(lockedNpcNames.length ? { minItems: lockedNpcNames.length, maxItems: lockedNpcNames.length } : {}), items: { type: 'object', properties: { name: { type: 'string' }, aliases: { type: 'array', items: { type: 'string' } }, gender: { type: 'string' }, age: { type: 'string' }, height: { type: 'string' }, appearance: { type: 'string' }, personality: { type: 'string' }, identity: { type: 'string' }, past: { type: 'string' }, relationship: { type: 'string' }, attitude: { type: 'string' }, quotes: { type: 'array', items: { type: 'string' } }, nsfw: { type: 'string' }, body: { type: 'string' } }, required: ['name', 'aliases', 'gender', 'age', 'height', 'appearance', 'personality', 'identity', 'past', 'relationship', 'attitude', 'quotes', 'nsfw', 'body'] } } }, required: ['npcs'] };
+        const prompt = `${basePrompt()}\n当前 user 唯一姓名：${currentName || '尚未确定'}。NPC 与 user 的关系必须匹配这个姓名，不得把旧 user 人设、旧聊天或参考资料中的其他人当作当前 user。\n已接受的大纲：${state.outline}\n请只根据该大纲生成 ${npcCount} 主要 NPC。每个字段必须完整；如果大纲包含成人内容，相关 NPC 的年龄字段必须明确为成年人。严格按以下顺序输出每一名 NPC，第一行必须是 name（姓名）：name、aliases（称呼/关键词）、gender、age、height、appearance、personality、identity、past、relationship、attitude、quotes、nsfw、body。没有完成一个 NPC 的全部字段前，不得开始下一个 NPC。先简洁、完整地写完所有 NPC，再补充细节；不得用省略号或“内容已截断”代替字段。每名 NPC 都必须单独使用完整的 <npc>...</npc>，最后闭合 </npcs>。不得输出分析、解释、前言或 Markdown。外貌要有至少两条可识别细节，不能都是模板化帅哥美女；性格必须能从身份和过去经历合理推出，不能自相矛盾。NSFW 字段只写成年角色的偏好、体位和语言风格，不改变人物性格。关键词必须覆盖姓名、昵称、去姓名、user 对其特殊称呼。${previous}${lockedNamesRule}${outlineRule}${revision}\n如果无法返回 JSON，请使用 <npcs><npc>字段：内容</npc></npcs>，不要解释。`;
         const result = await generateStructured(
             prompt,
             npcSchema,
@@ -3751,9 +3766,9 @@ async function generateNpcs(feedback = '', mode = 'new', continuation = null) {
             throw new Error('AI 没有返回主要 NPC，请重试；当前 NPC 草稿已保留。');
         }
 
-        nextNpcs = lockNpcsToOutline(normalizeNpcCollection(nextNpcs), state.outlineData);
+        nextNpcs = lockNpcsToOutline(normalizeNpcCollection(nextNpcs), state.outlineData, lockedNpcNames);
         if (!nextNpcs) {
-            throw new Error(`AI 返回的 NPC 人数与大纲不一致。大纲要求 ${lockedNpcNames.length} 人（${lockedNpcNames.join('、')}），已保留原 NPC；请继续生成完整内容或重试。`);
+            throw new Error(`AI 返回的 NPC 人数与当前已有 NPC 不一致。当前要求 ${lockedNpcNames.length} 人（${lockedNpcNames.join('、')}），已保留原 NPC；请继续生成完整内容或重试。`);
         }
         if (npcNameCollision(nextNpcs, [currentName])) {
             throw new Error('大纲中的 NPC 姓名存在重复或与当前 user 重名，已拒绝写入；请先修正大纲角色名单。');
