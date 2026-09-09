@@ -1359,6 +1359,36 @@ function lockNpcNames(npcs, lockedNames) {
     });
 }
 
+function personalityContradictsCore(core, candidate) {
+    const source = canonicalText(core);
+    const expansion = canonicalText(candidate);
+    if (!source || !expansion) return false;
+    const conflicts = [
+        [/(?:冷酷|冷漠|寡言|寡淡|疏离|克制|沉着|理性|谨慎|沉稳)/u, /(?:热情奔放|极其热情|过分外向|鲁莽冲动|不计后果|放纵不羁)/u],
+        [/(?:热情|热烈|活泼|外向|直率|爽朗|张扬)/u, /(?:冷酷无情|极度冷漠|拒人千里|寡言少语|沉默寡言|畏缩封闭)/u],
+        [/(?:谨慎|理智|沉稳|冷静|克制)/u, /(?:鲁莽冲动|冲动行事|不计后果|莽撞冒进)/u],
+        [/(?:善良|温柔|正直|仁慈)/u, /(?:残忍嗜血|冷血残酷|以伤人为乐|恶毒无情)/u],
+        [/(?:忠诚|专一|守信)/u, /(?:见异思迁|反复背叛|背信弃义|四处留情)/u],
+    ];
+    return conflicts.some(([corePattern, conflictPattern]) => corePattern.test(source) && conflictPattern.test(expansion));
+}
+
+function expandNpcPersonality(core, candidate) {
+    const lockedCore = text(core).trim();
+    const generated = text(candidate).trim();
+    if (!lockedCore) return generated;
+    if (!generated) return lockedCore;
+    if (personalityContradictsCore(lockedCore, generated)) return lockedCore;
+
+    const normalizedCore = canonicalText(lockedCore);
+    const normalizedGenerated = canonicalText(generated);
+    if (normalizedGenerated.includes(normalizedCore)) return generated;
+    // Keep the outline's exact core visible while retaining the model's
+    // behavioral and motivational expansion. This avoids reducing a rich NPC
+    // personality to the short label used in the outline.
+    return `${lockedCore}；${generated}`;
+}
+
 function lockNpcsToOutline(npcs, outlineData) {
     const constraints = outlineNpcConstraints(outlineData);
     const locked = lockNpcNames(npcs, constraints.map(item => item.name));
@@ -1368,7 +1398,7 @@ function lockNpcsToOutline(npcs, outlineData) {
         return normalizeNpc({
             ...npc,
             name: constraint?.name || npc.name,
-            personality: constraint?.personality || npc.personality,
+            personality: expandNpcPersonality(constraint?.personality, npc.personality),
         });
     });
 }
@@ -3690,7 +3720,7 @@ async function generateNpcs(feedback = '', mode = 'new', continuation = null) {
             const personality = item.personality ? `；锁定性格原文：${item.personality}` : '';
             return `${item.name}${personality}；大纲相关原文：${item.source || '大纲只列出了姓名，其他设定须从完整大纲中判断'}`;
         }).join('\n');
-        const lockedNamesRule = `\n大纲是 NPC 姓名和核心性格的唯一权威来源。必须严格生成 ${lockedNpcNames.length} 名 NPC，并按照以下顺序逐字使用姓名：${lockedNpcNames.join('、')}。禁止改名、换同音字、拿别名替代 name、添加或删除 NPC。每名 NPC 的 personality 必须与大纲对该姓名的性格描述完全一致，不得反转、弱化、改写成冲突性格或把甲的设定给乙；大纲明确写有“性格：”时必须逐字复制其值。逐人约束如下：\n${outlineConstraintText}`;
+        const lockedNamesRule = `\n大纲是 NPC 姓名和核心性格的唯一权威来源。必须严格生成 ${lockedNpcNames.length} 名 NPC，并按照以下顺序逐字使用姓名：${lockedNpcNames.join('、')}。禁止改名、换同音字、拿别名替代 name、添加或删除 NPC。每名 NPC 的 personality 必须以大纲对应姓名后的核心性格为基础进行扩展：可以补充稳定的行为表现、心理动机、处事方式、关系中的反应和细节，但不得改变、否定、反转或弱化大纲的核心性格，也不能把甲的设定给乙。扩展后的 personality 必须保留大纲核心性格原文或其清晰含义；大纲明确写有“性格：”时，先写该核心性格，再补充扩展。逐人约束如下：\n${outlineConstraintText}`;
         const revision = mode === 'revise'
             ? `\n用户 NPC 修改意见：${feedback}\n这是基于当前 NPC 草稿的修改。只修改意见明确点名的 NPC、字段或内容；未点名的 NPC 以及未点名字段必须保持原值，尤其是姓名、身份、核心性格、关系、说话方式和已确认的成年人年龄。无论修改了几个字段，都必须重新输出全部 NPC 的完整结果，每名 NPC 都要包含全部字段，不能只返回修改部分，也不能使用 npc_patch。`
             : '';
