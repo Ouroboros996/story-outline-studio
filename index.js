@@ -286,6 +286,14 @@ function currentUserName() {
     return text(state?.userPersonaData?.name) || text(parseKeyValueBlock(state?.userPersona).name);
 }
 
+function externalUserPersonaText() {
+    return text(power_user?.persona_description);
+}
+
+function hasExternalUserPersona() {
+    return Boolean(externalUserPersonaText());
+}
+
 function historicalUserNames() {
     const current = canonicalText(currentUserName());
     return unique([
@@ -666,6 +674,8 @@ function defaultState() {
             patchTag: '',
             mode: 'new',
             feedback: '',
+            draftToken: '',
+            draftIndex: -1,
             at: 0,
         },
     };
@@ -720,6 +730,8 @@ function getState() {
             patchTag: text(next.continuation.patchTag),
             mode: text(next.continuation.mode) || 'new',
             feedback: text(next.continuation.feedback),
+            draftToken: text(next.continuation.draftToken),
+            draftIndex: Number.isInteger(Number(next.continuation.draftIndex)) ? Number(next.continuation.draftIndex) : -1,
             at: Number(next.continuation.at) || 0,
         }
         : defaultState().continuation;
@@ -1290,6 +1302,30 @@ function taggedNpcPatches(raw) {
     }).filter(Boolean);
 }
 
+function lockNpcNames(npcs, lockedNames) {
+    const names = unique(lockedNames);
+    if (!names.length || !Array.isArray(npcs) || npcs.length !== names.length) return null;
+    const remaining = [...names];
+    const assignments = npcs.map(npc => {
+        const normalized = normalizeNpc(npc);
+        const candidateNames = [normalized.name, ...normalized.aliases].map(canonicalText).filter(Boolean);
+        const matchedIndex = remaining.findIndex(name => candidateNames.includes(canonicalText(name)));
+        const lockedName = matchedIndex >= 0 ? remaining.splice(matchedIndex, 1)[0] : remaining.shift();
+        return {
+            lockedName,
+            npc: normalized,
+        };
+    });
+    return names.map(name => {
+        const assignment = assignments.find(item => canonicalText(item.lockedName) === canonicalText(name));
+        return normalizeNpc({
+            ...(assignment?.npc || {}),
+            name,
+            aliases: unique([name, ...(assignment?.npc?.aliases || [])]),
+        });
+    });
+}
+
 function outlineCharacterNamesFromText(raw) {
     const names = [];
     const source = stripReasoningBlocks(raw);
@@ -1434,11 +1470,15 @@ function generationDiagnosticsMarkup() {
 
 function personaMarkup() {
     const existing = text(power_user.persona_description);
+    const externalPersona = Boolean(existing);
     const displayedPersona = state.userPersona || personaToText(state.userPersonaData) || existing;
+    const acceptance = externalPersona
+        ? '<span class="sos-ok">已采用酒馆现有人设</span>'
+        : state.userPersonaAccepted ? '<span class="sos-ok">已接受</span>' : '<span>尚未接受</span>';
     return `<div class="sos-section-intro"><span class="sos-kicker">02 / USER PERSONA</span><h2>确认 user 的人设</h2><p>${existing ? '检测到酒馆已有 user 人设。你可以直接采用，也可以在这里为本故事建立独立版本。' : '当前没有检测到酒馆 user 人设。先生成一份角色设定，后续大纲和剧情都会使用它。'}</p></div>${generationDiagnosticsMarkup()}
-        <div class="sos-persona-box"><textarea id="sos-persona" placeholder="用户人设会显示在这里">${escapeHtml(displayedPersona)}</textarea><div class="sos-persona-meta">${state.userPersonaAccepted ? '<span class="sos-ok">已接受</span>' : '<span>尚未接受</span>'}</div></div>
+        <div class="sos-persona-box"><textarea id="sos-persona" placeholder="用户人设会显示在这里">${escapeHtml(displayedPersona)}</textarea><div class="sos-persona-meta">${acceptance}</div></div>
         <div class="sos-revise"><label>人设修改意见</label><textarea id="sos-persona-feedback" placeholder="例如：保留姓名和职业，把性格改得更寡言，补充右手旧伤；未提到的字段保持不变"></textarea></div>
-        <div class="sos-actions"><button type="button" class="sos-secondary" data-action="reroll-persona"><i class="fa-solid fa-dice"></i> 直接重 roll</button><button type="button" class="sos-secondary" data-action="revise-persona"><i class="fa-solid fa-pen"></i> 按意见修改</button><button type="button" class="sos-primary" data-action="accept-persona"><i class="fa-solid fa-check"></i> 接受这份人设并继续</button></div>`;
+        <div class="sos-actions"><button type="button" class="sos-secondary" data-action="reroll-persona"><i class="fa-solid fa-dice"></i> 直接重 roll</button><button type="button" class="sos-secondary" data-action="revise-persona"><i class="fa-solid fa-pen"></i> 按意见修改</button>${externalPersona ? '' : '<button type="button" class="sos-primary" data-action="accept-persona"><i class="fa-solid fa-check"></i> 接受这份人设并继续</button>'}</div>`;
 }
 
 function outlineMarkup() {
@@ -1529,7 +1569,7 @@ function dashboardMarkup() {
 }
 
 function stageComplete(stage) {
-    return stage === 'config' ? Boolean(state.config.backgrounds.length || customValues('backgrounds').length) : stage === 'persona' ? state.userPersonaAccepted : stage === 'outline' ? state.outlineAccepted : stage === 'npc' ? state.npcsAccepted : state.currentTurn > 0;
+    return stage === 'config' ? Boolean(state.config.backgrounds.length || customValues('backgrounds').length) : stage === 'persona' ? state.userPersonaAccepted || hasExternalUserPersona() : stage === 'outline' ? state.outlineAccepted : stage === 'npc' ? state.npcsAccepted : state.currentTurn > 0;
 }
 
 function openPanel(stage = activeStage, reloadState = true) {
@@ -1789,7 +1829,7 @@ async function handleAction(action, button) {
     if (action === 'reroll-outline') return generateOutline();
     if (action === 'revise-outline') return reviseOutline();
     if (action === 'accept-outline') return acceptOutline();
-    if (action === 'reroll-npc') return generateNpcs();
+    if (action === 'reroll-npc') return generateNpcs('', 'reroll-locked');
     if (action === 'revise-npc') {
         const feedback = text(document.getElementById('sos-npc-feedback')?.value);
         if (!feedback) return toastr.warning('请先填写 NPC 修改意见。');
@@ -2554,9 +2594,73 @@ function saveContinuation(kind, raw, prompt, schema, responseLength, options = {
         patchTag: text(options.patchTag),
         mode: text(options.continuationMeta?.mode) || 'new',
         feedback: text(options.continuationMeta?.feedback),
+        draftToken: text(options.draftToken || options.continuationMeta?.draftToken),
+        draftIndex: Number.isInteger(Number(options.draftIndex)) ? Number(options.draftIndex) : Number(options.continuationMeta?.draftIndex) || -1,
         at: Date.now(),
     };
     saveState();
+}
+
+function findStructuredDraft(token, fallbackIndex = -1) {
+    if (!Array.isArray(ctx?.chat)) return null;
+    if (token) {
+        const found = ctx.chat.find(message => text(message?.extra?.storyOutlineStudioDraft?.token) === token);
+        if (found) return found;
+    }
+    return Number.isInteger(fallbackIndex) && fallbackIndex >= 0 ? ctx.chat[fallbackIndex] : null;
+}
+
+async function replaceStructuredDraft(generated, resolvedRaw, continuation) {
+    if (!Array.isArray(ctx?.chat)) return null;
+    const token = text(continuation?.draftToken) || text(generated?.extra?.storyOutlineStudioDraft?.token);
+    const original = findStructuredDraft(token, Number(continuation?.draftIndex));
+    const target = original || generated;
+    if (!target) return null;
+    if (original === generated) return generated;
+    target.mes = text(resolvedRaw);
+    target.extra = {
+        ...(target.extra || {}),
+        storyOutlineStudioDraft: {
+            ...(target.extra?.storyOutlineStudioDraft || {}),
+            kind: continuation?.kind || target.extra?.storyOutlineStudioDraft?.kind,
+            token,
+            at: Date.now(),
+        },
+    };
+    if (generated && generated !== target) {
+        const generatedIndex = ctx.chat.indexOf(generated);
+        if (generatedIndex >= 0) ctx.chat.splice(generatedIndex, 1);
+    }
+    await ctx.saveChat?.();
+    return target;
+}
+
+async function retainStructuredDraft(raw, kind, token, index = -1) {
+    if (!Array.isArray(ctx?.chat) || !raw) return { token, index };
+    const existing = findStructuredDraft(token, index);
+    if (existing) {
+        existing.mes = text(raw);
+        existing.extra = {
+            ...(existing.extra || {}),
+            storyOutlineStudioDraft: {
+                ...(existing.extra?.storyOutlineStudioDraft || {}),
+                kind,
+                token,
+                at: Date.now(),
+            },
+        };
+        await ctx.saveChat?.();
+        return { token, index: ctx.chat.indexOf(existing) };
+    }
+    const draft = {
+        name: ctx.name2 || 'Assistant',
+        is_user: false,
+        mes: text(raw),
+        extra: { storyOutlineStudioDraft: { kind, token, at: Date.now() } },
+    };
+    ctx.chat.push(draft);
+    await ctx.saveChat?.();
+    return { token, index: ctx.chat.indexOf(draft) };
 }
 
 function clearContinuation(kind = '') {
@@ -2727,7 +2831,7 @@ function getGenerationSchema(schema, patchTag) {
     return relaxed;
 }
 
-async function generateJson(prompt, schema, responseLength = 1200, { allowText = false, patchTag = '', continuationRaw = '', continuationMeta = null } = {}) {
+async function generateJson(prompt, schema, responseLength = 1200, { allowText = false, patchTag = '', continuationRaw = '', continuationMeta = null, draftToken = '', draftIndex = -1 } = {}) {
     // Read the assistant body back from SillyTavern and parse it locally. The
     // core structured-output path may turn a valid tag/plain-text response
     // into an empty object before an extension gets to inspect it.
@@ -2794,10 +2898,13 @@ async function generateJson(prompt, schema, responseLength = 1200, { allowText =
     }
     const truncated = isLikelyTruncatedResponse(raw, parsed, schema);
     if (truncated) {
-        saveContinuation(kind, raw, prompt, schema, responseLength, { allowText, patchTag, continuationMeta });
+        const token = text(draftToken) || generationNonce(`${kind}-draft`);
+        const draft = await retainStructuredDraft(raw, kind, token, Number(draftIndex));
+        saveContinuation(kind, raw, prompt, schema, responseLength, { allowText, patchTag, continuationMeta, draftToken: draft.token, draftIndex: draft.index });
         saveGenerationSnapshot(kind, { raw, error: 'AI 输出被截断，等待继续生成' });
         throw new Error('AI 输出似乎被截断，已保留前文。请点击“继续生成”完成并导入。');
     }
+    if (continuationRaw) await replaceStructuredDraft(null, raw, { kind, draftToken, draftIndex });
     if (parsed && hasGeneratedShape(parsed, schema)) {
         clearContinuation(kind);
         saveGenerationSnapshot(kind, { raw });
@@ -2813,7 +2920,7 @@ async function generateJson(prompt, schema, responseLength = 1200, { allowText =
     throw new Error(`AI 返回内容无法识别为 JSON、标签或字段文本，请重试。响应摘要：${preview}`);
 }
 
-async function generateJsonForeground(prompt, schema, { allowText = false, patchTag = '', continuationRaw = '', continuationMeta = null } = {}) {
+async function generateJsonForeground(prompt, schema, { allowText = false, patchTag = '', continuationRaw = '', continuationMeta = null, draftToken = '', draftIndex = -1 } = {}) {
     // SillyTavern 1.17 deliberately excludes quiet requests from its streaming
     // processor. A foreground request is the only honest way to expose native
     // streaming, so its structured draft is intentionally retained in chat.
@@ -2933,15 +3040,30 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
     if (resolvedRaw !== raw) raw = resolvedRaw;
     const truncated = isLikelyTruncatedResponse(raw, parsed, schema);
     if (truncated) {
-        saveContinuation(kind, raw, prompt, schema, 12000, { allowText, patchTag, continuationMeta });
+        const token = text(draftToken) || generationNonce(`${kind}-draft`);
+        let currentDraftIndex = Number(draftIndex);
+        if (continuationRaw) {
+            const draft = await replaceStructuredDraft(generated, raw, { kind, draftToken: token, draftIndex: currentDraftIndex });
+            currentDraftIndex = draft ? ctx.chat.indexOf(draft) : currentDraftIndex;
+        } else if (generated && (ctx.chat || []).includes(generated)) {
+            generated.extra = {
+                ...(generated.extra || {}),
+                storyOutlineStudioDraft: { kind, token, at: Date.now() },
+            };
+            currentDraftIndex = ctx.chat.indexOf(generated);
+            await ctx.saveChat?.();
+        }
+        saveContinuation(kind, raw, prompt, schema, 12000, { allowText, patchTag, continuationMeta, draftToken: token, draftIndex: currentDraftIndex });
         saveGenerationSnapshot(kind, { raw, error: 'AI 输出被截断，等待继续生成' });
         throw new Error('AI 输出似乎被截断，已保留前文。请点击“继续生成”完成并导入。');
     }
+    if (continuationRaw) generated = await replaceStructuredDraft(generated, raw, { kind, draftToken, draftIndex });
     const generatedInChat = (ctx.chat || []).includes(generated);
     if (generatedInChat) {
+        const token = text(draftToken) || text(generated.extra?.storyOutlineStudioDraft?.token) || generationNonce(`${kind}-draft`);
         generated.extra = {
             ...(generated.extra || {}),
-            storyOutlineStudioDraft: { kind, at: Date.now() },
+            storyOutlineStudioDraft: { ...(generated.extra?.storyOutlineStudioDraft || {}), kind, token, at: Date.now() },
         };
         await ctx.saveChat?.();
     }
@@ -2982,6 +3104,22 @@ async function withGenerating(task, label = '正在生成中...') {
 }
 
 async function startOutline() {
+    const externalPersona = externalUserPersonaText();
+    if (externalPersona) {
+        // A persona already configured in Tavern is an accepted source of
+        // truth, even when it is free-form text rather than key/value fields.
+        state.userPersona = externalPersona;
+        const parsedPersona = parseKeyValueBlock(externalPersona);
+        state.userPersonaData = Object.values(parsedPersona).some(Boolean) ? normalizePersonaData(parsedPersona) : {};
+        const chatUserName = currentUserName();
+        if (chatUserName && parsedPersona.name && canonicalText(parsedPersona.name) !== canonicalText(chatUserName)) {
+            parsedPersona.name = chatUserName;
+            state.userPersona = personaToText(parsedPersona) || externalPersona;
+            state.userPersonaData = normalizePersonaData(parsedPersona);
+        }
+        state.userPersonaAccepted = true;
+        saveState();
+    }
     if (!state.userPersonaAccepted) {
         if (text(state.userPersona)) {
             activeStage = 'persona';
@@ -2989,8 +3127,8 @@ async function startOutline() {
             toastr.warning('请先接受当前 user 人设，或重新生成后再继续。');
             return;
         }
-        if (text(power_user.persona_description)) {
-            state.userPersona = text(power_user.persona_description);
+        if (externalPersona) {
+            state.userPersona = externalPersona;
             const parsedPersona = parseKeyValueBlock(state.userPersona);
             const chatUserName = currentUserName();
             if (chatUserName && parsedPersona.name && canonicalText(parsedPersona.name) !== canonicalText(chatUserName)) {
@@ -3034,7 +3172,7 @@ async function generatePersona(feedback = '', mode = 'new', continuation = null)
             ? `\n这是全新生成，不是对旧人设润色。随机生成标识：${generationNonce('persona')}。请更换姓名、成长经历、职业细节和辨识度特征，不要复用当前草稿。`
             : '';
         const prompt = `${basePrompt()}\n请生成 user 的故事人设。必须返回完整字段：name、gender、age、appearance、personality、identity、past、habits、boundaries。设定要和配置的背景、性别方向、剧情标签兼容；如果故事包含成人内容，年龄字段必须明确为成年人。${previous}${revision}${novelty}\n保留基线中未被明确要求修改的内容；不要返回空字段。若无法返回 JSON，请输出 <persona> 标签，标签内每行一个“字段：内容”。`;
-        const result = await generateJson(prompt, { type: 'object', properties: { name: { type: 'string' }, gender: { type: 'string' }, age: { type: 'string' }, appearance: { type: 'string' }, personality: { type: 'string' }, identity: { type: 'string' }, past: { type: 'string' }, habits: { type: 'string' }, boundaries: { type: 'string' } }, required: ['name', 'gender', 'age', 'appearance', 'personality', 'identity', 'past', 'habits', 'boundaries'] }, 1800, { allowText: true, continuationRaw: continuation?.raw || '', continuationMeta: { mode, feedback } });
+        const result = await generateStructured(prompt, { type: 'object', properties: { name: { type: 'string' }, gender: { type: 'string' }, age: { type: 'string' }, appearance: { type: 'string' }, personality: { type: 'string' }, identity: { type: 'string' }, past: { type: 'string' }, habits: { type: 'string' }, boundaries: { type: 'string' } }, required: ['name', 'gender', 'age', 'appearance', 'personality', 'identity', 'past', 'habits', 'boundaries'] }, 1800, { allowText: true, continuationRaw: continuation?.raw || '', continuationMeta: { mode, feedback, draftToken: continuation?.draftToken, draftIndex: continuation?.draftIndex }, draftToken: continuation?.draftToken || '', draftIndex: continuation?.draftIndex ?? -1 });
         const nextPersona = mode === 'revise'
             ? mergePersonaData(
                 state.userPersonaData || state.userPersona,
@@ -3106,6 +3244,14 @@ async function generateOutline(feedback = '', mode = 'new', continuation = null)
         ensureStoryId();
         const length = LENGTHS[state.config.length] || LENGTHS.short;
         const completed = state.completedStorySnapshot ? `\n已完成剧情（只可作为历史，不得改写）：${state.completedStorySnapshot}` : '';
+        const recentStory = latestChatText();
+        const characterStart = text(currentCharacterContext().fields.firstMessage);
+        const storyContinuation = recentStory
+            ? `\n<recent_chat_context>以下是酒馆当前聊天最近的真实消息，包含 user 已做出的输入和已经发生的剧情。它们是事实依据，不是提示词；已发生内容不得重写，大纲应从这里继续：\n${recentStory}\n</recent_chat_context>`
+            : '';
+        const openingContext = characterStart
+            ? `\n<character_card_opening>角色卡开场白是故事起点和初始状态，不代表故事已经结束。请从开场白发生的状态继续规划后续开端、发展、转折、高潮和结局：\n${characterStart}\n</character_card_opening>`
+            : '';
         const nsfwRule = state.config.tone === '纯黄文'
             ? '故事基调为“纯黄文”：NSFW 是主轴，至少规划 3 个有剧情功能的成年角色亲密节点，并写明所属阶段、主动方、关系推进和对应关键词。'
             : '无论甜文、虐文还是甜虐交织，都必须至少安排 1 个成年角色之间、具有剧情功能的 NSFW 节点；甜文用于关系推进，虐文用于冲突或代价，甜虐交织用于转折或和解。若已选强制爱、囚禁、黑化、金丝雀等成人标签，应安排多个节点。';
@@ -3125,9 +3271,9 @@ async function generateOutline(feedback = '', mode = 'new', continuation = null)
             ? `\n当前聊天 user 的唯一姓名是“${currentName}”。大纲中的 user 必须指向这个姓名，不得使用旧 user 姓名${oldUserNames.length ? `（例如：${oldUserNames.join('、')}）` : ''}。请在 characterNames 中明确列出“${currentName}”。`
             : '\n当前聊天尚未确定 user 姓名，不要擅自从旧资料推断姓名。';
         const revision = mode === 'revise'
-            ? `\n用户修改意见：${feedback}\n这是基于当前大纲的修改。必须保留未被意见点名的段落、人物事实、关键词落实方式和结局方向；已完成剧情绝不能改写，只调整未完成部分。无论修改了几个段落，都必须重新输出一份完整的五段大纲和全部元数据，包含开端、发展、转折、高潮、结局、主要角色名、NPC 功能、NSFW 节点和硬性规则，不能只返回修改部分，也不能使用 outline_patch。`
+            ? `\n用户修改意见：${feedback}\n这是基于当前大纲的修改。必须保留未被意见点名的段落、人物事实、关键词落实方式和结局方向；已完成剧情绝不能改写，只调整未完成部分。${state.currentTurn > 0 ? '当前已经跑过部分剧情：请把已发生事件视为不可修改的历史，只重新规划未完成部分，并让新大纲从最近消息自然接上，不得跳到结局或后日谈。' : ''}无论修改了几个段落，都必须重新输出一份完整的五段大纲和全部元数据，包含开端、发展、转折、高潮、结局、主要角色名、NPC 功能、NSFW 节点和硬性规则，不能只返回修改部分，也不能使用 outline_patch。`
             : '';
-        const prompt = `${basePrompt()}\n任务：生成一份${length.label}小说剧情大纲。短篇、中篇、长篇只表示整体篇幅倾向、事件密度和推进节奏，不是硬性字数上限；工作台不会从 AI 返回的大纲中截断任何内容。输出必须包含开端、发展、转折、高潮、结局五段，按这五段分别填写字段，不能把所有内容塞入单一 outline 字段。先完整规划起承转合、因果链、高潮和明确结局，再控制叙述密度。不得使用“……”或"..."代替未完成内容，不得因为篇幅省略结局、因果链、关键词落实或 NSFW 节点。每段都要简洁但必须有具体事件、因果和结局。严格落实所有已选背景、关系、基调、结局、情节关键词和特别要求，不得自行删掉标签。另列出主要 NPC 功能、NSFW 节点、硬性规则。必须在 characterNames（主要角色名）中列出当前 user 和每一名主要 NPC 的最终姓名，不能只写“user”“NPC”或职能。${nsfwRule}\n所有人物必须明确为成年人，性行为必须发生在成年人之间并符合用户设定。${identityRule}${previous}${novelty}${revision}${completed}\n若无法返回 JSON，请使用纯文本标签：<outline>内含“开端：...\n发展：...\n转折：...\n高潮：...\n结局：...”</outline>，并另写“主要角色名：user姓名、全部主要 NPC 姓名”。`;
+        const prompt = `${basePrompt()}\n任务：生成一份${length.label}小说剧情大纲。短篇、中篇、长篇只表示整体篇幅倾向、事件密度和推进节奏，不是硬性字数上限；工作台不会从 AI 返回的大纲中截断任何内容。输出必须包含开端、发展、转折、高潮、结局五段，按这五段分别填写字段，不能把所有内容塞入单一 outline 字段。先完整规划起承转合、因果链、高潮和明确结局，再控制叙述密度。不得使用“……”或"..."代替未完成内容，不得因为篇幅省略结局、因果链、关键词落实或 NSFW 节点。每段都要简洁但必须有具体事件、因果和结局。严格落实所有已选背景、关系、基调、结局、情节关键词和特别要求，不得自行删掉标签。另列出主要 NPC 功能、NSFW 节点、硬性规则。必须在 characterNames（主要角色名）中列出当前 user 和每一名主要 NPC 的最终姓名，不能只写“user”“NPC”或职能。${nsfwRule}\n所有人物必须明确为成年人，性行为必须发生在成年人之间并符合用户设定。${identityRule}${previous}${novelty}${revision}${completed}${storyContinuation}${openingContext}\n若无法返回 JSON，请使用纯文本标签：<outline>内含“开端：...\n发展：...\n转折：...\n高潮：...\n结局：...”</outline>，并另写“主要角色名：user姓名、全部主要 NPC 姓名”。`;
         // Leave enough upstream output budget for a complete five-part outline
         // and its metadata. The selected length is a pacing hint, not a token
         // ceiling, and the local formatter no longer truncates the response.
@@ -3136,7 +3282,7 @@ async function generateOutline(feedback = '', mode = 'new', continuation = null)
             prompt,
             outlineSchema(),
             outlineResponseLength,
-            { allowText: true, continuationRaw: continuation?.raw || '', continuationMeta: { mode, feedback } },
+            { allowText: true, continuationRaw: continuation?.raw || '', continuationMeta: { mode, feedback, draftToken: continuation?.draftToken, draftIndex: continuation?.draftIndex }, draftToken: continuation?.draftToken || '', draftIndex: continuation?.draftIndex ?? -1 },
         );
         const finalOutlineData = mode === 'revise'
             ? mergeOutlineData(
@@ -3176,9 +3322,10 @@ async function generateOutline(feedback = '', mode = 'new', continuation = null)
         }
         state.outlineVersion += 1;
         state.outlineAccepted = false;
-        // An outline revision can reuse the current accepted NPC cast. Only
-        // a missing or unaccepted cast still needs the NPC generation step.
-        if (!state.npcs.length || !state.npcsAccepted) state.npcsAccepted = false;
+        // A fresh outline is a new route and must not silently reuse the old
+        // accepted cast. A revision keeps the existing cast so users can edit
+        // the route without paying for NPC generation again.
+        if (mode === 'new' || !state.npcs.length || !state.npcsAccepted) state.npcsAccepted = false;
         state.lastGeneratedAt = Date.now();
         saveState();
         activeStage = 'outline';
@@ -3234,6 +3381,12 @@ async function generateNpcs(feedback = '', mode = 'new', continuation = null) {
             ? `\n当前 NPC 草稿（本次重生成的基线；除非用户明确要求，不要改变姓名、身份、核心性格、关系和说话方式）：${JSON.stringify(state.npcs)}`
             : '\n当前没有 NPC 草稿，请根据大纲生成全部主要 NPC。';
         const currentName = currentUserName();
+        const lockedNpcNames = mode === 'reroll-locked'
+            ? unique((state.npcs.length ? state.npcs.map(npc => npc.name) : outlineNpcNames(state.outlineData))
+                .filter(name => canonicalText(name) && canonicalText(name) !== canonicalText(currentName)))
+            : mode === 'revise'
+                ? unique(state.npcs.map(npc => npc.name).filter(name => canonicalText(name)))
+                : [];
         const previousNames = unique([
             ...currentStoryNpcNames(),
             currentName,
@@ -3242,6 +3395,9 @@ async function generateNpcs(feedback = '', mode = 'new', continuation = null) {
         const novelty = mode === 'new'
             ? `\n这是全新 NPC 阵容，不是对当前草稿换词。随机生成标识：${generationNonce('npc')}。每名 NPC 必须采用全新的姓名，严禁使用以下历史姓名或其同音/近似写法：${previousNames.join('、') || '暂无'}。NPC 姓名不得等于当前 user“${currentName || '未命名'}”。人物身份、核心矛盾、外貌辨识度和说话方式也要与历史阵容明显不同。`
             : '';
+        const lockedNamesRule = lockedNpcNames.length
+            ? `\n本次不是换人名操作。当前 NPC 姓名是锁定字段，必须逐字使用以下姓名，并按照这个顺序返回：${lockedNpcNames.join('、')}。禁止改名、换同音字、使用别名代替、添加或删除 NPC；每名 NPC 的性格、身份、关系和说话方式必须与当前大纲中对应姓名的角色功能一致。即使模型原本想生成其他姓名，最终 name 也必须是上述锁定姓名。`
+            : '';
         const revision = mode === 'revise'
             ? `\n用户 NPC 修改意见：${feedback}\n这是基于当前 NPC 草稿的修改。只修改意见明确点名的 NPC、字段或内容；未点名的 NPC 以及未点名字段必须保持原值，尤其是姓名、身份、核心性格、关系、说话方式和已确认的成年人年龄。无论修改了几个字段，都必须重新输出全部 NPC 的完整结果，每名 NPC 都要包含全部字段，不能只返回修改部分，也不能使用 npc_patch。`
             : '';
@@ -3249,12 +3405,12 @@ async function generateNpcs(feedback = '', mode = 'new', continuation = null) {
             ? '关系数量为 NP：生成所有承担主要关系线、冲突线或 NSFW 节点的主要 NPC，至少 2 人；不要只返回一个代表角色。'
             : '关系数量为 1V1：生成 1 名主要恋爱 NPC；只有在大纲明确需要且对主线有作用时，才额外生成少量功能 NPC。';
         const npcSchema = { type: 'object', properties: { npcs: { type: 'array', minItems: state.config.relationshipMode === 'NP' && mode === 'new' ? 2 : 1, items: { type: 'object', properties: { name: { type: 'string' }, aliases: { type: 'array', items: { type: 'string' } }, gender: { type: 'string' }, age: { type: 'string' }, height: { type: 'string' }, appearance: { type: 'string' }, personality: { type: 'string' }, identity: { type: 'string' }, past: { type: 'string' }, relationship: { type: 'string' }, attitude: { type: 'string' }, quotes: { type: 'array', items: { type: 'string' } }, nsfw: { type: 'string' }, body: { type: 'string' } }, required: ['name', 'aliases', 'gender', 'age', 'height', 'appearance', 'personality', 'identity', 'past', 'relationship', 'attitude', 'quotes', 'nsfw', 'body'] } } }, required: ['npcs'] };
-        const prompt = `${basePrompt()}\n当前 user 唯一姓名：${currentName || '尚未确定'}。NPC 与 user 的关系必须匹配这个姓名，不得把旧 user 人设、旧聊天或参考资料中的其他人当作当前 user。\n已接受的大纲：${state.outline}\n请生成该大纲所需的全部主要 NPC。${npcCountRule}必须返回至少 1 人且每个字段完整；如果大纲包含成人内容，相关 NPC 的年龄字段必须明确为成年人。严格按以下顺序输出每一名 NPC，第一行必须是 name（姓名）：name、aliases（称呼/关键词）、gender、age、height、appearance、personality、identity、past、relationship、attitude、quotes、nsfw、body。没有完成一个 NPC 的全部字段前，不得开始下一个 NPC。先简洁、完整地写完所有 NPC，再补充细节；不得用省略号或“内容已截断”代替字段。每名 NPC 都必须单独使用完整的 <npc>...</npc>，最后闭合 </npcs>。不得输出分析、解释、前言或 Markdown。外貌要有至少两条可识别细节，不能都是模板化帅哥美女；性格必须能从身份和过去经历合理推出，不能自相矛盾。NSFW 字段只写成年角色的偏好、体位和语言风格，不改变人物性格。关键词必须覆盖姓名、昵称、去姓名、user 对其特殊称呼。${previous}${novelty}${revision}\n如果无法返回 JSON，请使用 <npcs><npc>字段：内容</npc></npcs>，不要解释。`;
+        const prompt = `${basePrompt()}\n当前 user 唯一姓名：${currentName || '尚未确定'}。NPC 与 user 的关系必须匹配这个姓名，不得把旧 user 人设、旧聊天或参考资料中的其他人当作当前 user。\n已接受的大纲：${state.outline}\n请生成该大纲所需的全部主要 NPC。${npcCountRule}必须返回至少 1 人且每个字段完整；如果大纲包含成人内容，相关 NPC 的年龄字段必须明确为成年人。严格按以下顺序输出每一名 NPC，第一行必须是 name（姓名）：name、aliases（称呼/关键词）、gender、age、height、appearance、personality、identity、past、relationship、attitude、quotes、nsfw、body。没有完成一个 NPC 的全部字段前，不得开始下一个 NPC。先简洁、完整地写完所有 NPC，再补充细节；不得用省略号或“内容已截断”代替字段。每名 NPC 都必须单独使用完整的 <npc>...</npc>，最后闭合 </npcs>。不得输出分析、解释、前言或 Markdown。外貌要有至少两条可识别细节，不能都是模板化帅哥美女；性格必须能从身份和过去经历合理推出，不能自相矛盾。NSFW 字段只写成年角色的偏好、体位和语言风格，不改变人物性格。关键词必须覆盖姓名、昵称、去姓名、user 对其特殊称呼。${previous}${novelty}${lockedNamesRule}${revision}\n如果无法返回 JSON，请使用 <npcs><npc>字段：内容</npc></npcs>，不要解释。`;
         const result = await generateStructured(
             prompt,
             npcSchema,
             state.config.relationshipMode === 'NP' ? 16000 : 10000,
-            { allowText: true, continuationRaw: continuation?.raw || '', continuationMeta: { mode, feedback } },
+            { allowText: true, continuationRaw: continuation?.raw || '', continuationMeta: { mode, feedback, draftToken: continuation?.draftToken, draftIndex: continuation?.draftIndex }, draftToken: continuation?.draftToken || '', draftIndex: continuation?.draftIndex ?? -1 },
         );
         let nextNpcs = mode === 'revise'
             ? mergeNpcDrafts(
@@ -3276,7 +3432,13 @@ async function generateNpcs(feedback = '', mode = 'new', continuation = null) {
         }
 
         nextNpcs = normalizeNpcCollection(nextNpcs);
-        if (npcNameCollision(nextNpcs, mode === 'new' ? previousNames : [currentName])) {
+        if (mode === 'reroll-locked') {
+            const locked = lockNpcNames(nextNpcs, lockedNpcNames);
+            if (!locked) throw new Error('NPC 重 roll 返回的人数与当前大纲角色不一致，已保留原 NPC；请重试。');
+            nextNpcs = locked;
+        }
+        const collisionNames = mode === 'reroll-locked' ? [currentName] : mode === 'new' ? previousNames : [currentName];
+        if (npcNameCollision(nextNpcs, collisionNames)) {
             throw new Error('NPC 姓名存在重复、沿用历史角色或与当前 user 重名，已拒绝写入；当前 NPC 草稿未被覆盖。');
         }
         if (state.config.relationshipMode === 'NP' && nextNpcs.length < 2) {
@@ -3561,7 +3723,17 @@ function updateContinuityPrompt() {
 }
 
 function latestChatText() {
-    return (ctx.chat || []).slice(-8).map(message => `${message.name || (message.is_user ? ctx.name1 : ctx.name2)}：${message.mes}`).join('\n');
+    return (ctx.chat || []).slice(-12)
+        .filter(message => {
+            const extra = message?.extra || {};
+            return text(message?.mes)
+                && !extra.storyOutlineStudioDraft
+                && !extra.storyOutlineStudioTemporary
+                && !extra.storyOutlineStudio?.continuationDirective;
+        })
+        .slice(-8)
+        .map(message => `${message.name || (message.is_user ? ctx.name1 : ctx.name2)}：${message.mes}`)
+        .join('\n');
 }
 
 function isContinuationDirective(value) {
