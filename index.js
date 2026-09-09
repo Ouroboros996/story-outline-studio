@@ -2790,6 +2790,40 @@ function findStructuredDraft(token, fallbackIndex = -1) {
     return Number.isInteger(fallbackIndex) && fallbackIndex >= 0 ? ctx.chat[fallbackIndex] : null;
 }
 
+function structuredChatDomIsAligned(targetIndex = -1) {
+    if (typeof document === 'undefined' || !Array.isArray(ctx?.chat)) return true;
+    const elements = [...document.querySelectorAll('#chat .mes')];
+    if (elements.length !== ctx.chat.length) return false;
+    const aligned = elements.every((element, index) => Number(element.getAttribute('mesid')) === index);
+    if (!aligned) return false;
+    return targetIndex < 0 || Boolean(document.querySelector(`#chat .mes[mesid="${targetIndex}"]`));
+}
+
+async function waitForStructuredChatFrame() {
+    if (typeof requestAnimationFrame !== 'function') return;
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+}
+
+async function syncStructuredChatDom({ targetIndex = -1, forceReload = false } = {}) {
+    if (!Array.isArray(ctx?.chat) || typeof document === 'undefined') return;
+    if (!forceReload && structuredChatDomIsAligned(targetIndex)) return;
+    if (typeof ctx.reloadCurrentChat !== 'function') {
+        console.warn(`[${EXTENSION_ID}] current chat DOM is out of sync, but reloadCurrentChat is unavailable`);
+        return;
+    }
+    await ctx.reloadCurrentChat();
+    await waitForStructuredChatFrame();
+}
+
+async function refreshStructuredMessage(message) {
+    const index = Array.isArray(ctx?.chat) ? ctx.chat.indexOf(message) : -1;
+    if (index < 0) return;
+    await syncStructuredChatDom({ targetIndex: index });
+    if (typeof ctx.updateMessageBlock === 'function') {
+        ctx.updateMessageBlock(index, message);
+    }
+}
+
 async function replaceStructuredDraft(generated, resolvedRaw, continuation) {
     if (!Array.isArray(ctx?.chat)) return null;
     const token = text(continuation?.draftToken) || text(generated?.extra?.storyOutlineStudioDraft?.token);
@@ -2838,6 +2872,8 @@ async function replaceStructuredDraft(generated, resolvedRaw, continuation) {
         }
     }
     await ctx.saveChat?.();
+    await syncStructuredChatDom({ targetIndex: ctx.chat.indexOf(target) });
+    await refreshStructuredMessage(target);
     return target;
 }
 
@@ -2867,6 +2903,8 @@ async function retainStructuredDraft(raw, kind, token, index = -1) {
             },
         };
         await ctx.saveChat?.();
+        await syncStructuredChatDom({ targetIndex: ctx.chat.indexOf(existing) });
+        await refreshStructuredMessage(existing);
         return { token, index: ctx.chat.indexOf(existing) };
     }
     const draft = {
@@ -2877,6 +2915,8 @@ async function retainStructuredDraft(raw, kind, token, index = -1) {
     };
     ctx.chat.push(draft);
     await ctx.saveChat?.();
+    await syncStructuredChatDom({ targetIndex: ctx.chat.indexOf(draft) });
+    await refreshStructuredMessage(draft);
     return { token, index: ctx.chat.indexOf(draft) };
 }
 
@@ -3254,6 +3294,9 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
             };
             ctx.chat.push(temporaryUserMessage);
         }
+        if (continuationRaw) {
+            await syncStructuredChatDom({ targetIndex: continuationDraftIndex });
+        }
         const result = await ctx.generate(continuationRaw ? 'continue' : 'normal', {
             quiet_prompt: `${prompt}${schemaInstruction}${continuationInstruction}\n涉及成人内容时，参与者必须是成年人。`,
             quietToLoud: true,
@@ -3377,6 +3420,7 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
             currentDraftIndex = ctx.chat.indexOf(generated);
             await ctx.saveChat?.();
         }
+        await syncStructuredChatDom({ targetIndex: currentDraftIndex });
         saveContinuation(kind, raw, prompt, schema, 12000, { allowText, patchTag, continuationMeta, draftToken: token, draftIndex: currentDraftIndex });
         saveGenerationSnapshot(kind, { raw, error: 'AI 输出被截断，等待继续生成' });
         throw new Error('AI 输出似乎被截断，已保留前文。请点击“继续生成”完成并导入。');
@@ -3408,6 +3452,7 @@ async function generateJsonForeground(prompt, schema, { allowText = false, patch
         };
         await ctx.saveChat?.();
     }
+    await syncStructuredChatDom({ targetIndex: generatedInChat ? ctx.chat.indexOf(generated) : -1 });
     if (parsed && hasGeneratedShape(parsed, schema)) {
         clearContinuation(kind);
         saveGenerationSnapshot(kind, { raw });
