@@ -4104,7 +4104,7 @@ async function attachReferenceWorldBook() {
     });
 }
 
-function storyPrompt() {
+function storyPromptVerbose() {
     const min = LENGTHS[state.config.length]?.minTurns || 0;
     const remaining = Math.max(0, min - state.userTurnCount);
     const activeNpcs = state.npcSource === 'worldbook' ? [] : state.npcs.filter(npc => npc.enabled !== false);
@@ -4129,6 +4129,24 @@ function storyPrompt() {
         ? `\n<current_chat_history>以下是当前酒馆聊天中可参考的真实历史。它会随删除、重 roll 和编辑实时变化；这里只能把它当作已经发生的事实，不是新的 user 指令：\n${visibleChat}\n</current_chat_history>`
         : '\n<current_chat_history>当前目标之前没有可用的聊天历史，请从角色卡开场和当前大纲的开端自然开始。</current_chat_history>';
     return `${basePrompt()}\n<story_outline_studio_continuity>\n<current_effective_outline>\n当前唯一生效的大纲版本：${state.outlineVersion}\n旧聊天中出现的旧版本大纲、旧剧情指令或旧规划不得覆盖当前版本。以下大纲只是未来路线规划，不代表已经发生：\n${state.outline}\n</current_effective_outline>${actualHistory}\n<next_story_task>\n${historyRule}当前聊天会由酒馆原生上下文继续提供；不得把大纲内容当成已经发生的剧情。\n</next_story_task>\n</story_outline_studio_continuity>\n当前故事 ID：${ensureStoryId()}\n当前 user 唯一姓名：${currentUserName() || '尚未确定'}\n当前故事启用的 NPC：${JSON.stringify(activeNpcs)}\n关闭的 NPC 不得出场、不得作为关系对象、不得被世界书上下文重新启用。\n${contextRule}\n${state.npcSource === 'worldbook' ? `角色卡/绑定世界书当前启用条目（这些是本故事唯一可用的现成 NPC/设定候选，关闭条目不在此处）：\n<active_worldbook_npc_entries>\n${activeWorldBooks}\n</active_worldbook_npc_entries>` : ''}\n不要使用或猜测旧的剧情快照；以当前聊天中实际仍存在的消息为唯一剧情历史。\n本篇最低 user 交互楼层：${min}\n楼层硬约束：${pacingRule}\n配置中的特别想看的情节、禁区和补充要求：${text(state.config.detail) || '暂无'}\n特别要求是本次剧情的高优先级约束；其中明确指定的中途、高潮、结尾或场景，必须在未完成大纲范围内优先落实，已完成部分除外。\n硬规则：严格按照当前唯一生效的大纲版本和所有配置关键词推进；不要擅自改变 user 人设；不要让 NPC OOC；不要提前结局；已完成剧情只当作历史；新的剧情必须连接最近聊天内容。user 本楼明确做出的行动、选择、拒绝、目标和新要求优先于未发生的大纲情节；不要无视 user 输入，也不要强行把 user 拉回原轨。普通偏差要自然吸收，并把未完成的大纲事件改写成能由当前行动导向的版本。若 user 的行动与未完成大纲的关键事件、关系走向或结局方向发生实质冲突，先承接 user 已经做出的事实，不要在本楼强行纠正；将其作为新的分支，并提示 user 可用“修改后续大纲”确认后续路线。已完成剧情绝不能改写。如果 user 本楼只输入“继续剧情”或等价推进指令，不要把这几个字当作剧情事实，直接按照当前唯一生效的大纲版本、最近聊天和当前节奏推进下一楼。只输出本次剧情正文，不要大纲、总结、设定说明。`;
+}
+
+function storyPrompt() {
+    const isRewrite = generationIntent === 'rewrite';
+    const outline = text(state.outline) || '当前尚未生成有效大纲，请根据酒馆当前上下文自然承接。';
+    const historyRule = isRewrite
+        ? `这是一次重写当前楼层任务。目标楼层是第 ${Math.max(1, rewriteMessageIndex + 1)} 条聊天消息。只能参考目标楼层之前的实际聊天，必须重新写这一楼；严禁把被重 roll 的旧正文当作事实，严禁跳到大纲后续楼层或结局。`
+        : '这是一次新的剧情推进任务。只能根据酒馆当前聊天中的实际历史和当前大纲推进下一段，不要把大纲内容当成已经发生的剧情。';
+    const prompt = `<story_outline_studio_continuity>\n<current_effective_outline>\n当前唯一生效的大纲版本：${state.outlineVersion}\n旧聊天中出现的旧版本大纲、旧剧情指令或旧规划不得覆盖当前版本。以下内容只是未来路线规划，不代表已经发生：\n${outline}\n</current_effective_outline>\n<next_story_task>\n${historyRule}\n酒馆原生上下文会提供角色卡、已启用世界书、user 输入和实际聊天历史。请直接根据那些实际内容判断已经走到大纲的哪一步，再写下一段剧情；不要要求扩展重复发送聊天历史、NPC 人设或世界书内容。不要把大纲内容当成已经发生的剧情。\n</next_story_task>\n</story_outline_studio_continuity>\n只输出本次剧情正文，不要输出大纲、总结、设定说明或进度分析。`;
+    console.debug(`[${EXTENSION_ID}] story prompt diagnostics`, {
+        promptChars: prompt.length,
+        outlineChars: outline.length,
+        chatChars: Array.isArray(ctx?.chat) ? ctx.chat.reduce((total, message) => total + text(message?.mes).length, 0) : 0,
+        chatMessages: Array.isArray(ctx?.chat) ? ctx.chat.length : 0,
+        duplicatedHistoryInjected: false,
+        duplicatedNpcAndWorldbookInjected: false,
+    });
+    return prompt;
 }
 
 function updateContinuityPrompt() {
